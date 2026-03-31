@@ -172,25 +172,60 @@ app.post('/api/auth/register', async (req, res) => {
     const client = await pool.connect();
     try {
         await client.query('BEGIN');
+        
+        // Validar que email no sea null
+        if (!email) {
+            return res.status(400).json({ error: 'El email es requerido' });
+        }
+        
+        // Verificar si ya existe una empresa con ese email
+        const existingCompany = await client.query(
+            'SELECT id FROM companies WHERE email = $1',
+            [email]
+        );
+        
+        if (existingCompany.rows.length > 0) {
+            return res.status(400).json({ error: 'La empresa ya está registrada' });
+        }
+        
         const hash = bcrypt.hashSync(password, 10);
         
+        // ✅ CORREGIDO: Insertar email en companies
         const companyResult = await client.query(
-            'INSERT INTO companies (name, created_at) VALUES ($1, NOW()) RETURNING id',
-            [company_name]
+            `INSERT INTO companies (name, email, subscription_plan, max_users, max_permits_month, created_at) 
+             VALUES ($1, $2, 'free', 5, 100, NOW()) 
+             RETURNING id`,
+            [company_name, email]
         );
         const companyId = companyResult.rows[0].id;
         
+        // Insertar usuario admin
         const userResult = await client.query(
-            'INSERT INTO users (company_id, email, password_hash, full_name, role, is_active, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING id, email, full_name, role',
-            [companyId, email, hash, full_name, 'admin', true]
+            `INSERT INTO users (company_id, email, password_hash, full_name, role, is_active, created_at) 
+             VALUES ($1, $2, $3, $4, 'admin', true, NOW()) 
+             RETURNING id, email, full_name, role`,
+            [companyId, email, hash, full_name]
         );
         
         await client.query('COMMIT');
         
         const newUser = userResult.rows[0];
-        const token = jwt.sign({ userId: newUser.id, email: newUser.email, role: newUser.role }, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+        const token = jwt.sign(
+            { userId: newUser.id, email: newUser.email, role: newUser.role }, 
+            JWT_SECRET, 
+            { expiresIn: JWT_EXPIRES_IN }
+        );
         
-        res.json({ success: true, token, user: { ...newUser, company_name, subscription_plan: 'free' } });
+        res.json({ 
+            success: true, 
+            token, 
+            user: { 
+                ...newUser, 
+                company_name, 
+                subscription_plan: 'free' 
+            } 
+        });
+        
     } catch (error) {
         await client.query('ROLLBACK');
         console.error('DETALLE DEL ERROR:', error.message);
