@@ -368,8 +368,11 @@ app.get('/api/health', async (req, res) => {
 module.exports = app;
 
 const PORT = process.env.PORT || 3001;
-if (process.env.NODE_ENV !== 'production') {
-    app.listen(PORT, () => {
-        console.log(`🚀 Servidor de Petrolinkvzla corriendo en http://localhost:${PORT}`);
-    });
-}
+
+// Escuchamos en 0.0.0.0 para que Railway pueda redirigir el tráfico
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🚀 Servidor de Petrolinkvzla activo en el puerto ${PORT}`);
+    if (process.env.NODE_ENV !== 'production') {
+        console.log(`🔗 Local: http://localhost:${PORT}`);
+    }
+});
