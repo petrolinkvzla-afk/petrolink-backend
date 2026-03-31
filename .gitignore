@@ -1,0 +1,5 @@
+# Crea el archivo .gitignore y pega esto:
+node_modules/
+.env
+.env.production
+*.log
