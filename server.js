@@ -4,6 +4,7 @@ const dotenv = require('dotenv');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { Pool } = require('pg');
+const PDFDocument = require('pdfkit');
 
 dotenv.config();
 
@@ -311,7 +312,7 @@ app.post('/api/users', authenticate, checkRole(['admin']), checkSubscriptionLimi
     }
 });
 
-// ============ RUTAS DE PERMISOS (CORREGIDA) ============
+// ============ RUTAS DE PERMISOS CON PDF ============
 app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res) => {
     try {
         const { 
@@ -325,55 +326,199 @@ app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res)
             photos 
         } = req.body;
         
-        // Sanitizar datos JSON para evitar errores de sintaxis
-        const sanitizedSafetyChecks = safety_checks || {};
-        const sanitizedTechnicianSignature = technician_signature || null;
-        const sanitizedPhotos = Array.isArray(photos) ? photos : [];
+        const timestamp = Date.now();
+        const random = Math.floor(Math.random() * 10000);
+        const permitNumber = `PTC-${timestamp}-${random}`;
         
-        const permitNumber = `PTC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
         const status = (req.user.role === 'admin' || req.user.role === 'supervisor') ? 'APPROVED' : 'PENDING';
+        
+        const safetyChecksJson = safety_checks ? JSON.stringify(safety_checks) : '{}';
+        const technicianSignatureJson = technician_signature ? JSON.stringify(technician_signature) : null;
+        const photosJson = photos ? JSON.stringify(photos) : '[]';
+        const photosCount = photos ? photos.length : 0;
         
         const result = await pool.query(
             `INSERT INTO permits (
                 permit_number, risk_type, safety_checks, technician_name, supervisor_name, 
                 work_location, work_description, status, technician_signature, photos, photos_count, 
-                created_at, created_by, created_by_name, created_by_role, company_id, 
-                approved_at, approved_by, approved_by_name
+                created_by, created_by_name, created_by_role, company_id, created_at
             ) VALUES (
-                $1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, 
-                NOW(), $12, $13, $14, $15,
-                $16, $17, $18
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()
             ) RETURNING *`,
             [
                 permitNumber, 
                 risk_type, 
-                JSON.stringify(sanitizedSafetyChecks),
+                safetyChecksJson,
                 technician_name, 
                 supervisor_name, 
                 work_location, 
                 work_description, 
                 status, 
-                sanitizedTechnicianSignature ? JSON.stringify(sanitizedTechnicianSignature) : null,
-                JSON.stringify(sanitizedPhotos),
-                sanitizedPhotos.length,
+                technicianSignatureJson,
+                photosJson,
+                photosCount,
                 req.user.id, 
                 req.user.full_name, 
                 req.user.role, 
-                req.user.company_id,
-                status === 'APPROVED' ? new Date().toISOString() : null,
-                status === 'APPROVED' ? req.user.id : null,
-                status === 'APPROVED' ? req.user.full_name : null
+                req.user.company_id
             ]
         );
         
         const newPermit = result.rows[0];
         
-        res.json({ 
-            success: true, 
-            permit: newPermit, 
-            safetyEvaluation: { isSafe: true }, 
-            requiresApproval: req.user.role === 'technician' 
+        // Generar PDF
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        let buffers = [];
+        
+        doc.on('data', buffers.push.bind(buffers));
+        
+        doc.on('end', () => {
+            const pdfData = Buffer.concat(buffers);
+            const pdfBase64 = pdfData.toString('base64');
+            
+            res.json({ 
+                success: true, 
+                permit: newPermit, 
+                safetyEvaluation: { isSafe: true }, 
+                pdf: pdfBase64,
+                requiresApproval: req.user.role === 'technician' 
+            });
         });
+        
+        // ============ CONTENIDO DEL PDF ============
+        
+        // Encabezado
+        doc.fontSize(20)
+           .font('Helvetica-Bold')
+           .text('ENERGY-COMPLIANCE', { align: 'center' })
+           .moveDown(0.5);
+        
+        doc.fontSize(14)
+           .font('Helvetica')
+           .text('PERMISO DE TRABAJO SEGURO', { align: 'center' })
+           .moveDown(0.5);
+        
+        // Línea separadora
+        doc.moveTo(50, doc.y)
+           .lineTo(550, doc.y)
+           .stroke()
+           .moveDown(0.5);
+        
+        // Datos del permiso
+        doc.fontSize(10)
+           .font('Helvetica-Bold')
+           .text(`Número: ${newPermit.permit_number}`)
+           .font('Helvetica')
+           .text(`Fecha: ${new Date().toLocaleString('es-ES')}`)
+           .text(`Riesgo: ${newPermit.risk_type === 'ALTURA' ? 'Trabajo en Altura' : 
+                                 newPermit.risk_type === 'ELECTRICO' ? 'Riesgo Eléctrico' :
+                                 newPermit.risk_type === 'CONFINADO' ? 'Espacio Confinado' :
+                                 newPermit.risk_type === 'CALIENTE' ? 'Trabajo en Caliente' : newPermit.risk_type}`)
+           .moveDown(0.5);
+        
+        // Datos del personal
+        doc.fontSize(12)
+           .font('Helvetica-Bold')
+           .text('DATOS DEL PERSONAL')
+           .moveDown(0.3);
+        
+        doc.fontSize(10)
+           .font('Helvetica')
+           .text(`Técnico: ${newPermit.technician_name}`)
+           .text(`Supervisor: ${newPermit.supervisor_name}`)
+           .moveDown(0.5);
+        
+        // Ubicación y descripción
+        doc.fontSize(12)
+           .font('Helvetica-Bold')
+           .text('UBICACIÓN Y DESCRIPCIÓN')
+           .moveDown(0.3);
+        
+        doc.fontSize(10)
+           .font('Helvetica')
+           .text(`Ubicación: ${newPermit.work_location}`)
+           .moveDown(0.3)
+           .text('Descripción:')
+           .text(newPermit.work_description, { width: 500, align: 'justify' })
+           .moveDown(0.5);
+        
+        // Lista de verificación
+        doc.fontSize(12)
+           .font('Helvetica-Bold')
+           .text('LISTA DE VERIFICACIÓN')
+           .moveDown(0.3);
+        
+        const checks = newPermit.safety_checks;
+        if (checks && typeof checks === 'object') {
+            Object.entries(checks).forEach(([key, value]) => {
+                const label = key.replace(/_/g, ' ').toUpperCase();
+                doc.fontSize(10)
+                   .font('Helvetica')
+                   .text(`✓ ${label}: ${value ? 'SÍ' : 'NO'}`);
+            });
+        }
+        doc.moveDown(0.5);
+        
+        // Evidencia fotográfica
+        doc.fontSize(12)
+           .font('Helvetica-Bold')
+           .text(`EVIDENCIA FOTOGRÁFICA`)
+           .moveDown(0.3);
+        
+        doc.fontSize(10)
+           .font('Helvetica')
+           .text(`${newPermit.photos_count} foto(s) adjunta(s)`)
+           .moveDown(0.5);
+        
+        // Estado
+        let statusText = '';
+        let statusColor = '';
+        if (newPermit.status === 'APPROVED') {
+            statusText = '✅ APROBADO - TRABAJO SEGURO';
+            statusColor = 'green';
+        } else if (newPermit.status === 'REJECTED') {
+            statusText = '❌ RECHAZADO';
+            statusColor = 'red';
+        } else {
+            statusText = '⏳ PENDIENTE DE APROBACIÓN';
+            statusColor = 'orange';
+        }
+        
+        doc.fontSize(12)
+           .font('Helvetica-Bold')
+           .fillColor(statusColor)
+           .text(statusText, { align: 'center' })
+           .fillColor('black')
+           .moveDown(0.5);
+        
+        // Firmas
+        doc.fontSize(12)
+           .font('Helvetica-Bold')
+           .text('FIRMAS DIGITALES', { align: 'center' })
+           .moveDown(0.5);
+        
+        doc.fontSize(10)
+           .font('Helvetica')
+           .text(`Técnico: ${newPermit.technician_signature?.signerName || 'Pendiente'}`)
+           .text(`Supervisor: ${newPermit.supervisor_signature?.signerName || 'Pendiente'}`);
+        
+        if (newPermit.technician_signature?.location) {
+            doc.text(`GPS Técnico: ${newPermit.technician_signature.location.latitude?.toFixed(6)}, ${newPermit.technician_signature.location.longitude?.toFixed(6)}`);
+        }
+        
+        doc.text(`Fecha generación: ${new Date().toLocaleString('es-ES')}`);
+        
+        // Pie de página
+        doc.fontSize(8)
+           .fillColor('gray')
+           .text(
+               `Documento generado por Energy-Compliance - Sistema de Gestión de Permisos de Trabajo Seguro`,
+               50,
+               doc.page.height - 50,
+               { align: 'center', width: 500 }
+           );
+        
+        doc.end();
         
     } catch (error) {
         console.error('Error al crear permiso:', error);
@@ -418,10 +563,36 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
     if (action === 'approve') {
         const result = await pool.query(
             `UPDATE permits SET status = 'APPROVED', approved_by = $1, approved_by_name = $2, 
-             approved_at = NOW(), supervisor_signature = $3::jsonb WHERE id = $4 RETURNING *`,
+             approved_at = NOW(), supervisor_signature = $3 WHERE id = $4 RETURNING *`,
             [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
         );
-        return res.json({ success: true, permit: result.rows[0] });
+        
+        // Generar PDF para permiso aprobado
+        const approvedPermit = result.rows[0];
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        let buffers = [];
+        
+        doc.on('data', buffers.push.bind(buffers));
+        doc.on('end', () => {
+            const pdfData = Buffer.concat(buffers);
+            const pdfBase64 = pdfData.toString('base64');
+            
+            res.json({ 
+                success: true, 
+                permit: approvedPermit,
+                pdf: pdfBase64
+            });
+        });
+        
+        // Contenido del PDF aprobado
+        doc.fontSize(20).font('Helvetica-Bold').text('ENERGY-COMPLIANCE', { align: 'center' }).moveDown(0.5);
+        doc.fontSize(14).text('PERMISO DE TRABAJO SEGURO - APROBADO', { align: 'center' }).moveDown(0.5);
+        doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke().moveDown(0.5);
+        doc.fontSize(10).font('Helvetica-Bold').text(`Número: ${approvedPermit.permit_number}`);
+        doc.font('Helvetica').text(`Fecha aprobación: ${new Date().toLocaleString('es-ES')}`);
+        doc.text(`Aprobado por: ${approvedPermit.approved_by_name}`);
+        doc.end();
+        
     } else if (action === 'reject') {
         const result = await pool.query(
             `UPDATE permits SET status = 'REJECTED', rejected_by = $1, rejected_by_name = $2, 
