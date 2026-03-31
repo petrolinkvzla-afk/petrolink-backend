@@ -634,78 +634,104 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
     const { permitId } = req.params;
     const { action, supervisor_signature, rejection_reason } = req.body;
     
-    const permitResult = await pool.query(
-        'SELECT * FROM permits WHERE id = $1 AND company_id = $2',
-        [parseInt(permitId), req.user.company_id]
-    );
-    
-    if (permitResult.rows.length === 0) {
-        return res.status(404).json({ error: 'Permiso no encontrado' });
-    }
-    
-    const permit = permitResult.rows[0];
-    if (permit.status !== 'PENDING') {
-        return res.status(400).json({ error: 'Ya fue procesado' });
-    }
-    
-    if (action === 'approve') {
-        const result = await pool.query(
-            `UPDATE permits SET status = 'APPROVED', approved_by = $1, approved_by_name = $2, 
-             approved_at = NOW(), supervisor_signature = $3 WHERE id = $4 RETURNING *`,
-            [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
+    try {
+        const permitResult = await pool.query(
+            'SELECT * FROM permits WHERE id = $1 AND company_id = $2',
+            [parseInt(permitId), req.user.company_id]
         );
         
-        const approvedPermit = result.rows[0];
-        
-        // Generar PDF con firma del supervisor
-        const doc = new PDFDocument({ margin: 50, size: 'A4' });
-        let buffers = [];
-        
-        doc.on('data', buffers.push.bind(buffers));
-        doc.on('end', () => {
-            const pdfData = Buffer.concat(buffers);
-            const pdfBase64 = pdfData.toString('base64');
-            
-            res.json({ 
-                success: true, 
-                permit: approvedPermit,
-                pdf: pdfBase64
-            });
-        });
-        
-        // Contenido del PDF aprobado (similar al anterior pero con firma de supervisor)
-        doc.fontSize(20).font('Helvetica-Bold').text('ENERGY-COMPLIANCE', { align: 'center' }).moveDown(0.5);
-        doc.fontSize(14).text('PERMISO DE TRABAJO SEGURO - APROBADO', { align: 'center' }).moveDown(0.5);
-        doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke().moveDown(0.5);
-        
-        doc.fontSize(10).font('Helvetica-Bold').text(`Número: ${approvedPermit.permit_number}`);
-        doc.font('Helvetica').text(`Fecha aprobación: ${new Date().toLocaleString('es-ES')}`);
-        doc.text(`Aprobado por: ${approvedPermit.approved_by_name}`);
-        
-        // Agregar firma del supervisor
-        if (supervisor_signature && supervisor_signature.signatureData) {
-            doc.moveDown(0.5);
-            doc.fontSize(10).font('Helvetica-Bold').text('Firma del Supervisor:');
-            try {
-                const base64Data = supervisor_signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
-                const imageBuffer = Buffer.from(base64Data, 'base64');
-                doc.image(imageBuffer, { width: 150, height: 60 });
-            } catch (err) {
-                doc.text('(Firma digital registrada)');
-            }
+        if (permitResult.rows.length === 0) {
+            return res.status(404).json({ error: 'Permiso no encontrado' });
         }
         
-        doc.end();
+        const permit = permitResult.rows[0];
+        if (permit.status !== 'PENDING') {
+            return res.status(400).json({ error: 'Ya fue procesado' });
+        }
         
-    } else if (action === 'reject') {
-        const result = await pool.query(
-            `UPDATE permits SET status = 'REJECTED', rejected_by = $1, rejected_by_name = $2, 
-             rejected_at = NOW(), rejection_reason = $3 WHERE id = $4 RETURNING *`,
-            [req.user.id, req.user.full_name, rejection_reason || 'Sin especificar', parseInt(permitId)]
-        );
-        return res.json({ success: true, permit: result.rows[0] });
+        if (action === 'approve') {
+            const result = await pool.query(
+                `UPDATE permits SET status = 'APPROVED', approved_by = $1, approved_by_name = $2, 
+                 approved_at = NOW(), supervisor_signature = $3 WHERE id = $4 RETURNING *`,
+                [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
+            );
+            
+            const approvedPermit = result.rows[0];
+            
+            // Generar PDF con firma del supervisor
+            const doc = new PDFDocument({ margin: 50, size: 'A4' });
+            let buffers = [];
+            
+            doc.on('data', buffers.push.bind(buffers));
+            doc.on('end', () => {
+                const pdfData = Buffer.concat(buffers);
+                const pdfBase64 = pdfData.toString('base64');
+                
+                // Enviar respuesta solo una vez
+                return res.json({ 
+                    success: true, 
+                    permit: approvedPermit,
+                    pdf: pdfBase64
+                });
+            });
+            
+            doc.on('error', (err) => {
+                console.error('Error generando PDF:', err);
+                return res.json({ 
+                    success: true, 
+                    permit: approvedPermit,
+                    pdf: null
+                });
+            });
+            
+            // Contenido del PDF aprobado
+            doc.fontSize(20).font('Helvetica-Bold').text('ENERGY-COMPLIANCE', { align: 'center' }).moveDown(0.5);
+            doc.fontSize(14).text('PERMISO DE TRABAJO SEGURO - APROBADO', { align: 'center' }).moveDown(0.5);
+            doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke().moveDown(0.5);
+            
+            doc.fontSize(10).font('Helvetica-Bold').text(`Número: ${approvedPermit.permit_number}`);
+            doc.font('Helvetica').text(`Fecha aprobación: ${new Date().toLocaleString('es-ES')}`);
+            doc.text(`Aprobado por: ${approvedPermit.approved_by_name}`);
+            doc.text(`Técnico: ${approvedPermit.technician_name}`);
+            doc.text(`Ubicación: ${approvedPermit.work_location}`);
+            doc.moveDown(0.5);
+            
+            // Agregar firma del supervisor
+            if (supervisor_signature && supervisor_signature.signatureData) {
+                doc.fontSize(10).font('Helvetica-Bold').text('Firma del Supervisor:');
+                try {
+                    const base64Data = supervisor_signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                    const imageBuffer = Buffer.from(base64Data, 'base64');
+                    doc.image(imageBuffer, { width: 150, height: 60 });
+                } catch (err) {
+                    doc.text('(Firma digital registrada)');
+                }
+            }
+            
+            // Pie de página
+            doc.fontSize(8).fillColor('gray')
+                .text('Documento generado por Energy-Compliance - Sistema de Gestión de Permisos de Trabajo Seguro', 
+                    50, doc.page.height - 50, { align: 'center', width: 500 });
+            
+            doc.end();
+            
+        } else if (action === 'reject') {
+            const result = await pool.query(
+                `UPDATE permits SET status = 'REJECTED', rejected_by = $1, rejected_by_name = $2, 
+                 rejected_at = NOW(), rejection_reason = $3 WHERE id = $4 RETURNING *`,
+                [req.user.id, req.user.full_name, rejection_reason || 'Sin especificar', parseInt(permitId)]
+            );
+            return res.json({ success: true, permit: result.rows[0] });
+        } else {
+            return res.status(400).json({ error: 'Acción inválida' });
+        }
+        
+    } catch (error) {
+        console.error('Error en aprobación:', error);
+        if (!res.headersSent) {
+            return res.status(500).json({ error: 'Error al procesar la solicitud: ' + error.message });
+        }
     }
-    res.status(400).json({ error: 'Acción inválida' });
 });
 
 app.get('/api/dashboard/stats', authenticate, async (req, res) => {
