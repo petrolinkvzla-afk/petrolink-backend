@@ -658,8 +658,8 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
             
             const approvedPermit = result.rows[0];
             
-            // Generar PDF con firma del supervisor
-            const doc = new PDFDocument({ margin: 50, size: 'A4' });
+            // Generar PDF con formato profesional (mismo que el del técnico)
+            const doc = new PDFDocument({ margin: 50, size: 'A4', autoFirstPage: true });
             let buffers = [];
             
             doc.on('data', buffers.push.bind(buffers));
@@ -667,7 +667,6 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
                 const pdfData = Buffer.concat(buffers);
                 const pdfBase64 = pdfData.toString('base64');
                 
-                // Enviar respuesta solo una vez
                 return res.json({ 
                     success: true, 
                     permit: approvedPermit,
@@ -684,34 +683,227 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
                 });
             });
             
-            // Contenido del PDF aprobado
-            doc.fontSize(20).font('Helvetica-Bold').text('ENERGY-COMPLIANCE', { align: 'center' }).moveDown(0.5);
-            doc.fontSize(14).text('PERMISO DE TRABAJO SEGURO - APROBADO', { align: 'center' }).moveDown(0.5);
-            doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke().moveDown(0.5);
+            // ============ CONTENIDO DEL PDF PROFESIONAL ============
             
-            doc.fontSize(10).font('Helvetica-Bold').text(`Número: ${approvedPermit.permit_number}`);
-            doc.font('Helvetica').text(`Fecha aprobación: ${new Date().toLocaleString('es-ES')}`);
-            doc.text(`Aprobado por: ${approvedPermit.approved_by_name}`);
-            doc.text(`Técnico: ${approvedPermit.technician_name}`);
-            doc.text(`Ubicación: ${approvedPermit.work_location}`);
+            // Encabezado
+            doc.fontSize(20)
+               .font('Helvetica-Bold')
+               .text('ENERGY-COMPLIANCE', { align: 'center' })
+               .moveDown(0.5);
+            
+            doc.fontSize(14)
+               .font('Helvetica')
+               .text('PERMISO DE TRABAJO SEGURO', { align: 'center' })
+               .moveDown(0.5);
+            
+            // Línea separadora
+            doc.moveTo(50, doc.y)
+               .lineTo(550, doc.y)
+               .stroke()
+               .moveDown(0.5);
+            
+            // Estado aprobado destacado
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .fillColor('green')
+               .text('✅ APROBADO - TRABAJO SEGURO', { align: 'center' })
+               .fillColor('black')
+               .moveDown(0.5);
+            
+            // Datos del permiso
+            doc.fontSize(10)
+               .font('Helvetica-Bold')
+               .text(`Número: ${approvedPermit.permit_number}`)
+               .font('Helvetica')
+               .text(`Fecha de creación: ${new Date(approvedPermit.created_at).toLocaleString('es-ES')}`)
+               .text(`Fecha de aprobación: ${new Date().toLocaleString('es-ES')}`)
+               .text(`Riesgo: ${approvedPermit.risk_type === 'ALTURA' ? 'Trabajo en Altura' : 
+                                     approvedPermit.risk_type === 'ELECTRICO' ? 'Riesgo Eléctrico' :
+                                     approvedPermit.risk_type === 'CONFINADO' ? 'Espacio Confinado' :
+                                     approvedPermit.risk_type === 'CALIENTE' ? 'Trabajo en Caliente' : approvedPermit.risk_type}`)
+               .moveDown(0.5);
+            
+            // Datos del personal
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text('DATOS DEL PERSONAL')
+               .moveDown(0.3);
+            
+            doc.fontSize(10)
+               .font('Helvetica')
+               .text(`Técnico: ${approvedPermit.technician_name}`)
+               .text(`Supervisor: ${approvedPermit.supervisor_name}`)
+               .text(`Aprobado por: ${approvedPermit.approved_by_name}`)
+               .moveDown(0.5);
+            
+            // Ubicación y descripción
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text('UBICACIÓN Y DESCRIPCIÓN')
+               .moveDown(0.3);
+            
+            doc.fontSize(10)
+               .font('Helvetica')
+               .text(`Ubicación: ${approvedPermit.work_location}`)
+               .moveDown(0.3)
+               .text('Descripción:')
+               .text(approvedPermit.work_description, { width: 500, align: 'justify' })
+               .moveDown(0.5);
+            
+            // Lista de verificación
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text('LISTA DE VERIFICACIÓN')
+               .moveDown(0.3);
+            
+            const checks = approvedPermit.safety_checks;
+            if (checks && typeof checks === 'object') {
+                Object.entries(checks).forEach(([key, value]) => {
+                    const label = key.replace(/_/g, ' ').toUpperCase();
+                    doc.fontSize(10)
+                       .font('Helvetica')
+                       .text(`✓ ${label}: ${value ? 'SÍ' : 'NO'}`);
+                });
+            }
             doc.moveDown(0.5);
             
-            // Agregar firma del supervisor
-            if (supervisor_signature && supervisor_signature.signatureData) {
-                doc.fontSize(10).font('Helvetica-Bold').text('Firma del Supervisor:');
-                try {
-                    const base64Data = supervisor_signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
-                    const imageBuffer = Buffer.from(base64Data, 'base64');
-                    doc.image(imageBuffer, { width: 150, height: 60 });
-                } catch (err) {
-                    doc.text('(Firma digital registrada)');
+            // FIRMA DEL TÉCNICO
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text('FIRMA DEL TÉCNICO')
+               .moveDown(0.3);
+            
+            if (approvedPermit.technician_signature) {
+                const signature = approvedPermit.technician_signature;
+                doc.fontSize(10)
+                   .font('Helvetica')
+                   .text(`Firmado por: ${signature.signerName || 'Técnico'}`)
+                   .text(`Fecha: ${new Date(signature.timestamp).toLocaleString('es-ES')}`);
+                
+                if (signature.location) {
+                    doc.text(`Ubicación GPS: ${signature.location.latitude?.toFixed(6)}, ${signature.location.longitude?.toFixed(6)}`);
+                }
+                
+                if (signature.signatureData) {
+                    try {
+                        const base64Data = signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                        const imageBuffer = Buffer.from(base64Data, 'base64');
+                        doc.image(imageBuffer, { width: 150, height: 60 });
+                    } catch (err) {
+                        doc.text('(Imagen de firma registrada)');
+                    }
+                }
+            } else {
+                doc.fontSize(10).text('Pendiente de firma');
+            }
+            doc.moveDown(0.5);
+            
+            // FIRMA DEL SUPERVISOR
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text('FIRMA DEL SUPERVISOR')
+               .moveDown(0.3);
+            
+            if (supervisor_signature) {
+                doc.fontSize(10)
+                   .font('Helvetica')
+                   .text(`Firmado por: ${supervisor_signature.signerName || 'Supervisor'}`)
+                   .text(`Fecha: ${new Date(supervisor_signature.timestamp).toLocaleString('es-ES')}`);
+                
+                if (supervisor_signature.location) {
+                    doc.text(`Ubicación GPS: ${supervisor_signature.location.latitude?.toFixed(6)}, ${supervisor_signature.location.longitude?.toFixed(6)}`);
+                }
+                
+                if (supervisor_signature.signatureData) {
+                    try {
+                        const base64Data = supervisor_signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                        const imageBuffer = Buffer.from(base64Data, 'base64');
+                        doc.image(imageBuffer, { width: 150, height: 60 });
+                    } catch (err) {
+                        doc.text('(Imagen de firma registrada)');
+                    }
+                }
+            } else if (approvedPermit.supervisor_signature) {
+                const supervisorSig = approvedPermit.supervisor_signature;
+                doc.fontSize(10)
+                   .font('Helvetica')
+                   .text(`Firmado por: ${supervisorSig.signerName || 'Supervisor'}`)
+                   .text(`Fecha: ${new Date(supervisorSig.timestamp).toLocaleString('es-ES')}`);
+                
+                if (supervisorSig.location) {
+                    doc.text(`Ubicación GPS: ${supervisorSig.location.latitude?.toFixed(6)}, ${supervisorSig.location.longitude?.toFixed(6)}`);
+                }
+                
+                if (supervisorSig.signatureData) {
+                    try {
+                        const base64Data = supervisorSig.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                        const imageBuffer = Buffer.from(base64Data, 'base64');
+                        doc.image(imageBuffer, { width: 150, height: 60 });
+                    } catch (err) {
+                        doc.text('(Imagen de firma registrada)');
+                    }
                 }
             }
+            doc.moveDown(0.5);
+            
+            // EVIDENCIA FOTOGRÁFICA
+            doc.fontSize(12)
+               .font('Helvetica-Bold')
+               .text('EVIDENCIA FOTOGRÁFICA')
+               .moveDown(0.3);
+            
+            const photosData = approvedPermit.photos;
+            if (photosData && Array.isArray(photosData) && photosData.length > 0) {
+                doc.fontSize(10)
+                   .text(`${photosData.length} foto(s) adjunta(s) como evidencia del trabajo realizado:`)
+                   .moveDown(0.3);
+                
+                let yPos = doc.y;
+                photosData.forEach((photo, index) => {
+                    if (index < 3 && photo.data) {
+                        try {
+                            if (yPos > doc.page.height - 150) {
+                                doc.addPage();
+                                yPos = 50;
+                            }
+                            
+                            const base64Data = photo.data.replace(/^data:image\/\w+;base64,/, '');
+                            const imageBuffer = Buffer.from(base64Data, 'base64');
+                            doc.image(imageBuffer, { width: 150, height: 100 });
+                            doc.text(`Foto ${index + 1}`, { continued: true });
+                            doc.moveDown(0.5);
+                            yPos = doc.y;
+                        } catch (err) {
+                            doc.text(`Foto ${index + 1}: Imagen disponible`);
+                        }
+                    }
+                });
+                
+                if (photosData.length > 3) {
+                    doc.text(`... y ${photosData.length - 3} foto(s) adicional(es)`);
+                }
+            } else {
+                doc.fontSize(10).text('No se adjuntaron fotos como evidencia');
+            }
+            doc.moveDown(0.5);
+            
+            // Código de verificación
+            doc.fontSize(8)
+               .fillColor('gray')
+               .text(`Código de verificación: ${approvedPermit.permit_number.split('-')[1]}`, { align: 'center' })
+               .moveDown(0.3);
             
             // Pie de página
-            doc.fontSize(8).fillColor('gray')
-                .text('Documento generado por Energy-Compliance - Sistema de Gestión de Permisos de Trabajo Seguro', 
-                    50, doc.page.height - 50, { align: 'center', width: 500 });
+            doc.fontSize(8)
+               .fillColor('gray')
+               .text(
+                   `Documento generado por Energy-Compliance - Sistema de Gestión de Permisos de Trabajo Seguro\n` +
+                   `Este documento tiene validez legal y debe ser presentado en caso de auditoría.\n` +
+                   `Fecha de emisión: ${new Date().toLocaleString('es-ES')}`,
+                   50,
+                   doc.page.height - 80,
+                   { align: 'center', width: 500 }
+               );
             
             doc.end();
             
