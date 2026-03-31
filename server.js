@@ -34,19 +34,20 @@ pool.on('error', (err) => {
     console.error('DEBUG - Error inesperado en el Pool de Postgres:', err);
 });
 
-// Configuración CORS explícita
+// Configuración CORS mejorada
 const allowedOrigins = [
     'http://localhost:3000',
     'http://localhost:3001',
+    'http://localhost:5173',
     'https://energy-compliance.vercel.app',
     'https://energy-compliance-git-main.vercel.app',
-    'https://energy-compliance.vercel.app',
     'https://*.vercel.app'
 ];
 
+// Middleware CORS configurado correctamente
 app.use(cors({
     origin: function (origin, callback) {
-        // Permitir solicitudes sin origen (como Postman o apps móviles)
+        // Permitir solicitudes sin origen (como Postman)
         if (!origin) return callback(null, true);
         
         // Verificar si el origen está permitido
@@ -58,12 +59,12 @@ app.use(cors({
         }
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
     exposedHeaders: ['Content-Length', 'X-Requested-With']
 }));
 
-// Manejar preflight requests
+// Manejar preflight requests para TODAS las rutas
 app.options('*', cors());
 
 app.use(express.json({ limit: '50mb' }));
@@ -199,12 +200,10 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         await client.query('BEGIN');
         
-        // Validar que email no sea null
         if (!email) {
             return res.status(400).json({ error: 'El email es requerido' });
         }
         
-        // Verificar si ya existe una empresa con ese email
         const existingCompany = await client.query(
             'SELECT id FROM companies WHERE email = $1',
             [email]
@@ -216,7 +215,6 @@ app.post('/api/auth/register', async (req, res) => {
         
         const hash = bcrypt.hashSync(password, 10);
         
-        // ✅ CORREGIDO: Insertar email en companies
         const companyResult = await client.query(
             `INSERT INTO companies (name, email, subscription_plan, max_users, max_permits_month, created_at) 
              VALUES ($1, $2, 'free', 5, 100, NOW()) 
@@ -225,7 +223,6 @@ app.post('/api/auth/register', async (req, res) => {
         );
         const companyId = companyResult.rows[0].id;
         
-        // Insertar usuario admin
         const userResult = await client.query(
             `INSERT INTO users (company_id, email, password_hash, full_name, role, is_active, created_at) 
              VALUES ($1, $2, $3, $4, 'admin', true, NOW()) 
@@ -314,31 +311,74 @@ app.post('/api/users', authenticate, checkRole(['admin']), checkSubscriptionLimi
     }
 });
 
-// ============ RUTAS DE PERMISOS ============
+// ============ RUTAS DE PERMISOS (CORREGIDA) ============
 app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res) => {
-    const { risk_type, safety_checks, technician_name, supervisor_name, work_location, work_description, technician_signature, photos } = req.body;
-    const permitNumber = `PTC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
-    const status = (req.user.role === 'admin' || req.user.role === 'supervisor') ? 'APPROVED' : 'PENDING';
-    
-    const result = await pool.query(
-        `INSERT INTO permits (permit_number, risk_type, safety_checks, technician_name, supervisor_name, 
-         work_location, work_description, status, technician_signature, photos, photos_count, 
-         created_at, created_by, created_by_name, created_by_role, company_id, 
-         approved_at, approved_by, approved_by_name) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(), $12, $13, $14, $15, 
-         $16, $17, $18) RETURNING *`,
-        [permitNumber, risk_type, safety_checks, technician_name, supervisor_name, work_location, 
-         work_description, status, technician_signature, photos, (photos || []).length,
-         req.user.id, req.user.full_name, req.user.role, req.user.company_id,
-         status === 'APPROVED' ? new Date().toISOString() : null,
-         status === 'APPROVED' ? req.user.id : null,
-         status === 'APPROVED' ? req.user.full_name : null]
-    );
-    
-    const newPermit = result.rows[0];
-    const pdfBuffer = Buffer.from(`%PDF-1.4 placeholder for ${permitNumber}`);
-    
-    res.json({ success: true, permit: newPermit, safetyEvaluation: { isSafe: true }, pdf: pdfBuffer.toString('base64'), requiresApproval: req.user.role === 'technician' });
+    try {
+        const { 
+            risk_type, 
+            safety_checks, 
+            technician_name, 
+            supervisor_name, 
+            work_location, 
+            work_description, 
+            technician_signature, 
+            photos 
+        } = req.body;
+        
+        // Sanitizar datos JSON para evitar errores de sintaxis
+        const sanitizedSafetyChecks = safety_checks || {};
+        const sanitizedTechnicianSignature = technician_signature || null;
+        const sanitizedPhotos = Array.isArray(photos) ? photos : [];
+        
+        const permitNumber = `PTC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const status = (req.user.role === 'admin' || req.user.role === 'supervisor') ? 'APPROVED' : 'PENDING';
+        
+        const result = await pool.query(
+            `INSERT INTO permits (
+                permit_number, risk_type, safety_checks, technician_name, supervisor_name, 
+                work_location, work_description, status, technician_signature, photos, photos_count, 
+                created_at, created_by, created_by_name, created_by_role, company_id, 
+                approved_at, approved_by, approved_by_name
+            ) VALUES (
+                $1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb, $11, 
+                NOW(), $12, $13, $14, $15,
+                $16, $17, $18
+            ) RETURNING *`,
+            [
+                permitNumber, 
+                risk_type, 
+                JSON.stringify(sanitizedSafetyChecks),
+                technician_name, 
+                supervisor_name, 
+                work_location, 
+                work_description, 
+                status, 
+                sanitizedTechnicianSignature ? JSON.stringify(sanitizedTechnicianSignature) : null,
+                JSON.stringify(sanitizedPhotos),
+                sanitizedPhotos.length,
+                req.user.id, 
+                req.user.full_name, 
+                req.user.role, 
+                req.user.company_id,
+                status === 'APPROVED' ? new Date().toISOString() : null,
+                status === 'APPROVED' ? req.user.id : null,
+                status === 'APPROVED' ? req.user.full_name : null
+            ]
+        );
+        
+        const newPermit = result.rows[0];
+        
+        res.json({ 
+            success: true, 
+            permit: newPermit, 
+            safetyEvaluation: { isSafe: true }, 
+            requiresApproval: req.user.role === 'technician' 
+        });
+        
+    } catch (error) {
+        console.error('Error al crear permiso:', error);
+        res.status(500).json({ error: 'Error al crear permiso: ' + error.message });
+    }
 });
 
 app.get('/api/permits', authenticate, async (req, res) => {
@@ -378,8 +418,8 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
     if (action === 'approve') {
         const result = await pool.query(
             `UPDATE permits SET status = 'APPROVED', approved_by = $1, approved_by_name = $2, 
-             approved_at = NOW(), supervisor_signature = $3 WHERE id = $4 RETURNING *`,
-            [req.user.id, req.user.full_name, supervisor_signature, parseInt(permitId)]
+             approved_at = NOW(), supervisor_signature = $3::jsonb WHERE id = $4 RETURNING *`,
+            [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
         );
         return res.json({ success: true, permit: result.rows[0] });
     } else if (action === 'reject') {
@@ -425,7 +465,7 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
-// ✅ CRÍTICO PARA VERCEL: Exportar app en lugar de llamar app.listen()
+// ✅ Exportar app para Vercel
 module.exports = app;
 
 const PORT = process.env.PORT || 3001;
