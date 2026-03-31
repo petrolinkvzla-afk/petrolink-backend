@@ -34,12 +34,38 @@ pool.on('error', (err) => {
     console.error('DEBUG - Error inesperado en el Pool de Postgres:', err);
 });
 
+// Configuración CORS explícita
+const allowedOrigins = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'https://energy-compliance.vercel.app',
+    'https://energy-compliance-git-main.vercel.app',
+    'https://energy-compliance.vercel.app',
+    'https://*.vercel.app'
+];
+
 app.use(cors({
-    origin: true,
+    origin: function (origin, callback) {
+        // Permitir solicitudes sin origen (como Postman o apps móviles)
+        if (!origin) return callback(null, true);
+        
+        // Verificar si el origen está permitido
+        if (allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
+            callback(null, true);
+        } else {
+            console.log('❌ CORS bloqueado para:', origin);
+            callback(new Error('No permitido por CORS'));
+        }
+    },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+    exposedHeaders: ['Content-Length', 'X-Requested-With']
 }));
+
+// Manejar preflight requests
+app.options('*', cors());
+
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
