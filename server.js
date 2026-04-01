@@ -725,6 +725,8 @@ app.get('/api/permits', authenticate, async (req, res) => {
     }
 });
 
+// server/server.js - Modificar el reject para generar PDF
+
 app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'supervisor']), async (req, res) => {
     const { permitId } = req.params;
     const { action, supervisor_signature, rejection_reason } = req.body;
@@ -745,44 +747,33 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
         }
         
         if (action === 'approve') {
-            // ✅ APROBAR - CORREGIDO
-            const result = await pool.query(
-                `UPDATE permits 
-                 SET status = 'APPROVED', 
-                     approved_by = $1, 
-                     approved_by_name = $2, 
-                     approved_at = NOW(), 
-                     supervisor_signature = $3 
-                 WHERE id = $4 
-                 RETURNING *`,
-                [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
-            );
-            
-            const approvedPermit = result.rows[0];
-            
-            // Generar PDF completo con ambas firmas
-            const pdfBuffer = await generateFullPermitPDF(approvedPermit, supervisor_signature);
-            const pdfBase64 = pdfBuffer.toString('base64');
-            
-            return res.json({ 
-                success: true, 
-                permit: approvedPermit,
-                pdf: pdfBase64
-            });
+            // ... código de aprobación existente
             
         } else if (action === 'reject') {
-            // ✅ RECHAZAR - CORREGIDO (sin rejected_by_name)
+            // ✅ RECHAZAR CON PDF
             const result = await pool.query(
                 `UPDATE permits 
                  SET status = 'REJECTED', 
                      rejected_by = $1, 
+                     rejected_by_name = $2,
                      rejected_at = NOW(), 
-                     rejection_reason = $2 
-                 WHERE id = $3 
+                     rejection_reason = $3 
+                 WHERE id = $4 
                  RETURNING *`,
-                [req.user.id, rejection_reason || 'Sin especificar', parseInt(permitId)]
+                [req.user.id, req.user.full_name, rejection_reason || 'Sin especificar', parseInt(permitId)]
             );
-            return res.json({ success: true, permit: result.rows[0] });
+            
+            const rejectedPermit = result.rows[0];
+            
+            // Generar PDF de rechazo
+            const pdfBuffer = await generateRejectionPDF(rejectedPermit);
+            const pdfBase64 = pdfBuffer.toString('base64');
+            
+            return res.json({ 
+                success: true, 
+                permit: rejectedPermit,
+                pdf: pdfBase64
+            });
         } else {
             return res.status(400).json({ error: 'Acción inválida' });
         }
@@ -792,6 +783,121 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
         return res.status(500).json({ error: 'Error al procesar la solicitud' });
     }
 });
+
+// ✅ NUEVA FUNCIÓN: Generar PDF de rechazo
+function generateRejectionPDF(permit) {
+    return new Promise((resolve) => {
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        const buffers = [];
+        
+        doc.on('data', buffers.push.bind(buffers));
+        doc.on('end', () => {
+            const pdfData = Buffer.concat(buffers);
+            resolve(pdfData);
+        });
+        
+        // Encabezado
+        doc.fontSize(20).font('Helvetica-Bold').text('ENERGY-COMPLIANCE', { align: 'center' });
+        doc.moveDown(0.5);
+        doc.fontSize(14).font('Helvetica').text('PERMISO DE TRABAJO SEGURO - RECHAZADO', { align: 'center' });
+        doc.moveDown(0.5);
+        
+        // Línea separadora
+        doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+        doc.moveDown(0.5);
+        
+        // Estado RECHAZADO en rojo
+        doc.fontSize(12).font('Helvetica-Bold').fillColor('red').text('❌ PERMISO RECHAZADO', { align: 'center' });
+        doc.fillColor('black');
+        doc.moveDown(0.5);
+        
+        // Datos del permiso
+        doc.fontSize(10).font('Helvetica-Bold').text(`Número: ${permit.permit_number}`);
+        doc.font('Helvetica').text(`Fecha de creación: ${new Date(permit.created_at).toLocaleString('es-ES')}`);
+        doc.text(`Riesgo: ${permit.risk_type === 'ALTURA' ? 'Trabajo en Altura' : 
+                                 permit.risk_type === 'ELECTRICO' ? 'Riesgo Eléctrico' :
+                                 permit.risk_type === 'CONFINADO' ? 'Espacio Confinado' :
+                                 permit.risk_type === 'CALIENTE' ? 'Trabajo en Caliente' : permit.risk_type}`);
+        doc.moveDown(0.5);
+        
+        // Datos del personal
+        doc.fontSize(12).font('Helvetica-Bold').text('DATOS DEL PERSONAL');
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica').text(`Técnico: ${permit.technician_name}`);
+        doc.text(`Supervisor: ${permit.supervisor_name}`);
+        if (permit.rejected_by_name) {
+            doc.text(`Rechazado por: ${permit.rejected_by_name}`);
+            doc.text(`Fecha de rechazo: ${new Date(permit.rejected_at).toLocaleString('es-ES')}`);
+        }
+        doc.moveDown(0.5);
+        
+        // Ubicación y descripción
+        doc.fontSize(12).font('Helvetica-Bold').text('UBICACIÓN Y DESCRIPCIÓN');
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica').text(`Ubicación: ${permit.work_location}`);
+        doc.moveDown(0.3);
+        doc.text('Descripción:');
+        doc.text(permit.work_description, { width: 500, align: 'justify' });
+        doc.moveDown(0.5);
+        
+        // ✅ MOTIVO DEL RECHAZO - DESTACADO
+        doc.fontSize(12).font('Helvetica-Bold').fillColor('red').text('MOTIVO DEL RECHAZO');
+        doc.fillColor('black');
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica').text(permit.rejection_reason || 'No se especificó motivo', {
+            width: 500,
+            align: 'left',
+            continued: false
+        });
+        doc.moveDown(0.5);
+        
+        // Lista de verificación
+        doc.fontSize(12).font('Helvetica-Bold').text('LISTA DE VERIFICACIÓN');
+        doc.moveDown(0.3);
+        
+        const checks = permit.safety_checks;
+        if (checks && typeof checks === 'object') {
+            Object.entries(checks).forEach(([key, value]) => {
+                const label = key.replace(/_/g, ' ').toUpperCase();
+                doc.fontSize(10).font('Helvetica').text(`${value ? '✓' : '✗'} ${label}: ${value ? 'SÍ' : 'NO'}`);
+            });
+        }
+        doc.moveDown(0.5);
+        
+        // FIRMA DEL TÉCNICO
+        doc.fontSize(12).font('Helvetica-Bold').text('FIRMA DEL TÉCNICO');
+        doc.moveDown(0.3);
+        
+        if (permit.technician_signature) {
+            const signature = permit.technician_signature;
+            doc.fontSize(10).font('Helvetica').text(`Firmado por: ${signature.signerName || 'Técnico'}`);
+            doc.text(`Fecha: ${new Date(signature.timestamp).toLocaleString('es-ES')}`);
+            if (signature.signatureData) {
+                try {
+                    const base64Data = signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                    const imageBuffer = Buffer.from(base64Data, 'base64');
+                    doc.image(imageBuffer, { width: 200, height: 80 });
+                } catch (err) {
+                    doc.text('(Imagen de firma disponible)');
+                }
+            }
+        } else {
+            doc.fontSize(10).text('Pendiente de firma');
+        }
+        doc.moveDown(0.5);
+        
+        // Nota de rechazo
+        doc.fontSize(8).fillColor('gray').text(
+            `Este permiso ha sido RECHAZADO y no puede ser utilizado para realizar el trabajo.\n` +
+            `Se debe generar un nuevo permiso con las correcciones necesarias.\n` +
+            `Documento generado por Energy-Compliance - Sistema de Gestión de Permisos de Trabajo Seguro\n` +
+            `Fecha de emisión: ${new Date().toLocaleString('es-ES')}`,
+            { align: 'center', width: 500 }
+        );
+        
+        doc.end();
+    });
+}
 
 app.get('/api/dashboard/stats', authenticate, async (req, res) => {
     let query;
