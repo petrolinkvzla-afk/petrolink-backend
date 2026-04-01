@@ -745,9 +745,16 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
         }
         
         if (action === 'approve') {
+            // ✅ APROBAR - CORREGIDO
             const result = await pool.query(
-                `UPDATE permits SET status = 'APPROVED', approved_by = $1, approved_by_name = $2, 
-                 approved_at = NOW(), supervisor_signature = $3 WHERE id = $4 RETURNING *`,
+                `UPDATE permits 
+                 SET status = 'APPROVED', 
+                     approved_by = $1, 
+                     approved_by_name = $2, 
+                     approved_at = NOW(), 
+                     supervisor_signature = $3 
+                 WHERE id = $4 
+                 RETURNING *`,
                 [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
             );
             
@@ -764,10 +771,16 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
             });
             
         } else if (action === 'reject') {
+            // ✅ RECHAZAR - CORREGIDO (sin rejected_by_name)
             const result = await pool.query(
-                `UPDATE permits SET status = 'REJECTED', rejected_by = $1, rejected_by_name = $2, 
-                 rejected_at = NOW(), rejection_reason = $3 WHERE id = $4 RETURNING *`,
-                [req.user.id, req.user.full_name, rejection_reason || 'Sin especificar', parseInt(permitId)]
+                `UPDATE permits 
+                 SET status = 'REJECTED', 
+                     rejected_by = $1, 
+                     rejected_at = NOW(), 
+                     rejection_reason = $2 
+                 WHERE id = $3 
+                 RETURNING *`,
+                [req.user.id, rejection_reason || 'Sin especificar', parseInt(permitId)]
             );
             return res.json({ success: true, permit: result.rows[0] });
         } else {
