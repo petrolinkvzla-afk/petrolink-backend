@@ -627,6 +627,7 @@ app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res)
 
 // server/server.js - Actualizar GET /api/permits
 // server/server.js - GET /api/permits CORREGIDO
+// server/server.js - GET /api/permits CORREGIDO
 app.get('/api/permits', authenticate, async (req, res) => {
     let query;
     let params;
@@ -634,16 +635,8 @@ app.get('/api/permits', authenticate, async (req, res) => {
     if (req.user.role === 'technician') {
         query = `
             SELECT 
-                p.*,
-                ds.signature_data as technician_signature_data,
-                ds.is_within_geofence as technician_within_geofence,
-                ds.distance_to_work_meters as technician_distance,
-                ds_sup.signature_data as supervisor_signature_data,
-                ds_sup.is_within_geofence as supervisor_within_geofence,
-                ds_sup.distance_to_work_meters as supervisor_distance
+                p.*
             FROM permits p
-            LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
-            LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
             WHERE p.created_by = $1 
             ORDER BY p.created_at DESC
         `;
@@ -651,16 +644,8 @@ app.get('/api/permits', authenticate, async (req, res) => {
     } else {
         query = `
             SELECT 
-                p.*,
-                ds.signature_data as technician_signature_data,
-                ds.is_within_geofence as technician_within_geofence,
-                ds.distance_to_work_meters as technician_distance,
-                ds_sup.signature_data as supervisor_signature_data,
-                ds_sup.is_within_geofence as supervisor_within_geofence,
-                ds_sup.distance_to_work_meters as supervisor_distance
+                p.*
             FROM permits p
-            LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
-            LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
             WHERE p.company_id = $1 
             ORDER BY p.created_at DESC
         `;
@@ -670,53 +655,51 @@ app.get('/api/permits', authenticate, async (req, res) => {
     try {
         const result = await pool.query(query, params);
         
-        // Procesar las firmas en JavaScript
+        // Procesar las firmas directamente desde las columnas de permits
         const permits = result.rows.map(permit => {
-            // Procesar firma del técnico
+            // Procesar firma del técnico desde la columna technician_signature
             let technician_signature = null;
-            if (permit.technician_signature_data) {
-                const sigData = typeof permit.technician_signature_data === 'string' 
-                    ? JSON.parse(permit.technician_signature_data) 
-                    : permit.technician_signature_data;
-                
-                technician_signature = {
-                    ...sigData,
-                    is_within_geofence: permit.technician_within_geofence,
-                    distance_to_work_meters: permit.technician_distance
-                };
+            if (permit.technician_signature) {
+                try {
+                    const sigData = typeof permit.technician_signature === 'string' 
+                        ? JSON.parse(permit.technician_signature) 
+                        : permit.technician_signature;
+                    
+                    technician_signature = sigData;
+                    
+                    // Log para depurar (opcional, puedes eliminarlo después)
+                    console.log(`✅ Permiso ${permit.id}: Firma técnica encontrada`, {
+                        tieneImagen: !!sigData.signatureData,
+                        tamanoImagen: sigData.signatureData?.length,
+                        ubicacion: !!sigData.location
+                    });
+                } catch (e) {
+                    console.error(`Error parsing technician signature for permit ${permit.id}:`, e);
+                }
             }
             
-            // Procesar firma del supervisor
+            // Procesar firma del supervisor desde la columna supervisor_signature
             let supervisor_signature = null;
-            if (permit.supervisor_signature_data) {
-                const sigData = typeof permit.supervisor_signature_data === 'string' 
-                    ? JSON.parse(permit.supervisor_signature_data) 
-                    : permit.supervisor_signature_data;
-                
-                supervisor_signature = {
-                    ...sigData,
-                    is_within_geofence: permit.supervisor_within_geofence,
-                    distance_to_work_meters: permit.supervisor_distance
-                };
+            if (permit.supervisor_signature) {
+                try {
+                    const sigData = typeof permit.supervisor_signature === 'string' 
+                        ? JSON.parse(permit.supervisor_signature) 
+                        : permit.supervisor_signature;
+                    
+                    supervisor_signature = sigData;
+                } catch (e) {
+                    console.error(`Error parsing supervisor signature for permit ${permit.id}:`, e);
+                }
             }
-            
-            // Remover campos temporales
-            const { 
-                technician_signature_data, 
-                technician_within_geofence, 
-                technician_distance,
-                supervisor_signature_data,
-                supervisor_within_geofence,
-                supervisor_distance,
-                ...cleanPermit 
-            } = permit;
             
             return {
-                ...cleanPermit,
+                ...permit,
                 technician_signature,
                 supervisor_signature
             };
         });
+        
+        console.log(`📊 Enviando ${permits.length} permisos al frontend`);
         
         res.json({ success: true, permits });
     } catch (error) {
