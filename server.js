@@ -698,6 +698,44 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
+// server/server.js - Agregar endpoint de validación de geocerca
+
+app.post('/api/signatures/validate', authenticate, async (req, res) => {
+    const { permitId, location } = req.body;
+    
+    if (!permitId || !location) {
+        return res.status(400).json({ error: 'Permiso y ubicación son requeridos' });
+    }
+    
+    try {
+        // Usar la función de validación SQL
+        const result = await pool.query(
+            `SELECT * FROM check_geofence($1, $2, $3, $4)`,
+            [permitId, location.latitude, location.longitude, location.accuracy || 0]
+        );
+        
+        const validation = result.rows[0];
+        
+        res.json({ 
+            success: true, 
+            validation: {
+                within_geofence: validation.within_geofence,
+                distance_meters: validation.distance_meters,
+                effective_radius: validation.effective_radius,
+                work_radius: validation.work_radius,
+                work_latitude: validation.work_latitude,
+                work_longitude: validation.work_longitude,
+                message: validation.message
+            }
+        });
+        
+    } catch (error) {
+        console.error('Error en validación de geocerca:', error);
+        res.status(500).json({ error: 'Error al validar ubicación' });
+    }
+});
+
+
 // ✅ Exportar app para Vercel
 module.exports = app;
 
