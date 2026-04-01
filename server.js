@@ -635,30 +635,12 @@ app.get('/api/permits', authenticate, async (req, res) => {
         query = `
             SELECT 
                 p.*,
-                CASE 
-                    WHEN ds.signature_data IS NOT NULL THEN 
-                        json_build_object(
-                            'signerName', ds.signature_data->>'signerName',
-                            'signatureData', ds.signature_data->>'signatureData',
-                            'location', ds.signature_data->'location',
-                            'timestamp', ds.signature_data->>'timestamp',
-                            'is_within_geofence', ds.is_within_geofence,
-                            'distance_to_work_meters', ds.distance_to_work_meters
-                        )
-                    ELSE NULL
-                END as technician_signature,
-                CASE 
-                    WHEN ds_sup.signature_data IS NOT NULL THEN 
-                        json_build_object(
-                            'signerName', ds_sup.signature_data->>'signerName',
-                            'signatureData', ds_sup.signature_data->>'signatureData',
-                            'location', ds_sup.signature_data->'location',
-                            'timestamp', ds_sup.signature_data->>'timestamp',
-                            'is_within_geofence', ds_sup.is_within_geofence,
-                            'distance_to_work_meters', ds_sup.distance_to_work_meters
-                        )
-                    ELSE NULL
-                END as supervisor_signature
+                ds.signature_data as technician_signature_data,
+                ds.is_within_geofence as technician_within_geofence,
+                ds.distance_to_work_meters as technician_distance,
+                ds_sup.signature_data as supervisor_signature_data,
+                ds_sup.is_within_geofence as supervisor_within_geofence,
+                ds_sup.distance_to_work_meters as supervisor_distance
             FROM permits p
             LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
             LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
@@ -670,30 +652,12 @@ app.get('/api/permits', authenticate, async (req, res) => {
         query = `
             SELECT 
                 p.*,
-                CASE 
-                    WHEN ds.signature_data IS NOT NULL THEN 
-                        json_build_object(
-                            'signerName', ds.signature_data->>'signerName',
-                            'signatureData', ds.signature_data->>'signatureData',
-                            'location', ds.signature_data->'location',
-                            'timestamp', ds.signature_data->>'timestamp',
-                            'is_within_geofence', ds.is_within_geofence,
-                            'distance_to_work_meters', ds.distance_to_work_meters
-                        )
-                    ELSE NULL
-                END as technician_signature,
-                CASE 
-                    WHEN ds_sup.signature_data IS NOT NULL THEN 
-                        json_build_object(
-                            'signerName', ds_sup.signature_data->>'signerName',
-                            'signatureData', ds_sup.signature_data->>'signatureData',
-                            'location', ds_sup.signature_data->'location',
-                            'timestamp', ds_sup.signature_data->>'timestamp',
-                            'is_within_geofence', ds_sup.is_within_geofence,
-                            'distance_to_work_meters', ds_sup.distance_to_work_meters
-                        )
-                    ELSE NULL
-                END as supervisor_signature
+                ds.signature_data as technician_signature_data,
+                ds.is_within_geofence as technician_within_geofence,
+                ds.distance_to_work_meters as technician_distance,
+                ds_sup.signature_data as supervisor_signature_data,
+                ds_sup.is_within_geofence as supervisor_within_geofence,
+                ds_sup.distance_to_work_meters as supervisor_distance
             FROM permits p
             LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
             LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
@@ -705,13 +669,61 @@ app.get('/api/permits', authenticate, async (req, res) => {
     
     try {
         const result = await pool.query(query, params);
-        res.json({ success: true, permits: result.rows });
+        
+        // Procesar las firmas en JavaScript
+        const permits = result.rows.map(permit => {
+            // Procesar firma del técnico
+            let technician_signature = null;
+            if (permit.technician_signature_data) {
+                const sigData = typeof permit.technician_signature_data === 'string' 
+                    ? JSON.parse(permit.technician_signature_data) 
+                    : permit.technician_signature_data;
+                
+                technician_signature = {
+                    ...sigData,
+                    is_within_geofence: permit.technician_within_geofence,
+                    distance_to_work_meters: permit.technician_distance
+                };
+            }
+            
+            // Procesar firma del supervisor
+            let supervisor_signature = null;
+            if (permit.supervisor_signature_data) {
+                const sigData = typeof permit.supervisor_signature_data === 'string' 
+                    ? JSON.parse(permit.supervisor_signature_data) 
+                    : permit.supervisor_signature_data;
+                
+                supervisor_signature = {
+                    ...sigData,
+                    is_within_geofence: permit.supervisor_within_geofence,
+                    distance_to_work_meters: permit.supervisor_distance
+                };
+            }
+            
+            // Remover campos temporales
+            const { 
+                technician_signature_data, 
+                technician_within_geofence, 
+                technician_distance,
+                supervisor_signature_data,
+                supervisor_within_geofence,
+                supervisor_distance,
+                ...cleanPermit 
+            } = permit;
+            
+            return {
+                ...cleanPermit,
+                technician_signature,
+                supervisor_signature
+            };
+        });
+        
+        res.json({ success: true, permits });
     } catch (error) {
         console.error('Error en GET /api/permits:', error);
         res.status(500).json({ error: 'Error al obtener permisos', details: error.message });
     }
 });
-
 
 app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'supervisor']), async (req, res) => {
     const { permitId } = req.params;
