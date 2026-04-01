@@ -626,64 +626,90 @@ app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res)
 
 
 // server/server.js - Actualizar GET /api/permits
+// server/server.js - GET /api/permits CORREGIDO
 app.get('/api/permits', authenticate, async (req, res) => {
     let query;
     let params;
     
     if (req.user.role === 'technician') {
-        query = `SELECT 
-            p.*, 
-            json_build_object(
-                'signerName', t.signature_data->>'signerName',
-                'signatureData', t.signature_data->>'signatureData',
-                'location', t.signature_data->'location',
-                'timestamp', t.signature_data->>'timestamp',
-                'is_within_geofence', ds.is_within_geofence,
-                'distance_to_work_meters', ds.distance_to_work_meters
-            ) as technician_signature,
-            json_build_object(
-                'signerName', s.signature_data->>'signerName',
-                'signatureData', s.signature_data->>'signatureData',
-                'location', s.signature_data->'location',
-                'timestamp', s.signature_data->>'timestamp',
-                'is_within_geofence', ds_sup.is_within_geofence,
-                'distance_to_work_meters', ds_sup.distance_to_work_meters
-            ) as supervisor_signature
-        FROM permits p
-        LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
-        LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
-        WHERE p.created_by = $1 
-        ORDER BY p.created_at DESC`;
+        query = `
+            SELECT 
+                p.*,
+                CASE 
+                    WHEN ds.signature_data IS NOT NULL THEN 
+                        json_build_object(
+                            'signerName', ds.signature_data->>'signerName',
+                            'signatureData', ds.signature_data->>'signatureData',
+                            'location', ds.signature_data->'location',
+                            'timestamp', ds.signature_data->>'timestamp',
+                            'is_within_geofence', ds.is_within_geofence,
+                            'distance_to_work_meters', ds.distance_to_work_meters
+                        )
+                    ELSE NULL
+                END as technician_signature,
+                CASE 
+                    WHEN ds_sup.signature_data IS NOT NULL THEN 
+                        json_build_object(
+                            'signerName', ds_sup.signature_data->>'signerName',
+                            'signatureData', ds_sup.signature_data->>'signatureData',
+                            'location', ds_sup.signature_data->'location',
+                            'timestamp', ds_sup.signature_data->>'timestamp',
+                            'is_within_geofence', ds_sup.is_within_geofence,
+                            'distance_to_work_meters', ds_sup.distance_to_work_meters
+                        )
+                    ELSE NULL
+                END as supervisor_signature
+            FROM permits p
+            LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
+            LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
+            WHERE p.created_by = $1 
+            ORDER BY p.created_at DESC
+        `;
         params = [req.user.id];
     } else {
-        query = `SELECT 
-            p.*, 
-            json_build_object(
-                'signerName', t.signature_data->>'signerName',
-                'signatureData', t.signature_data->>'signatureData',
-                'location', t.signature_data->'location',
-                'timestamp', t.signature_data->>'timestamp',
-                'is_within_geofence', ds.is_within_geofence,
-                'distance_to_work_meters', ds.distance_to_work_meters
-            ) as technician_signature,
-            json_build_object(
-                'signerName', s.signature_data->>'signerName',
-                'signatureData', s.signature_data->>'signatureData',
-                'location', s.signature_data->'location',
-                'timestamp', s.signature_data->>'timestamp',
-                'is_within_geofence', ds_sup.is_within_geofence,
-                'distance_to_work_meters', ds_sup.distance_to_work_meters
-            ) as supervisor_signature
-        FROM permits p
-        LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
-        LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
-        WHERE p.company_id = $1 
-        ORDER BY p.created_at DESC`;
+        query = `
+            SELECT 
+                p.*,
+                CASE 
+                    WHEN ds.signature_data IS NOT NULL THEN 
+                        json_build_object(
+                            'signerName', ds.signature_data->>'signerName',
+                            'signatureData', ds.signature_data->>'signatureData',
+                            'location', ds.signature_data->'location',
+                            'timestamp', ds.signature_data->>'timestamp',
+                            'is_within_geofence', ds.is_within_geofence,
+                            'distance_to_work_meters', ds.distance_to_work_meters
+                        )
+                    ELSE NULL
+                END as technician_signature,
+                CASE 
+                    WHEN ds_sup.signature_data IS NOT NULL THEN 
+                        json_build_object(
+                            'signerName', ds_sup.signature_data->>'signerName',
+                            'signatureData', ds_sup.signature_data->>'signatureData',
+                            'location', ds_sup.signature_data->'location',
+                            'timestamp', ds_sup.signature_data->>'timestamp',
+                            'is_within_geofence', ds_sup.is_within_geofence,
+                            'distance_to_work_meters', ds_sup.distance_to_work_meters
+                        )
+                    ELSE NULL
+                END as supervisor_signature
+            FROM permits p
+            LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
+            LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
+            WHERE p.company_id = $1 
+            ORDER BY p.created_at DESC
+        `;
         params = [req.user.company_id];
     }
     
-    const result = await pool.query(query, params);
-    res.json({ success: true, permits: result.rows });
+    try {
+        const result = await pool.query(query, params);
+        res.json({ success: true, permits: result.rows });
+    } catch (error) {
+        console.error('Error en GET /api/permits:', error);
+        res.status(500).json({ error: 'Error al obtener permisos', details: error.message });
+    }
 });
 
 
