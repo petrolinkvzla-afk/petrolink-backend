@@ -542,6 +542,7 @@ app.post('/api/users', authenticate, checkRole(['admin']), checkSubscriptionLimi
 });
 
 // ============ RUTAS DE PERMISOS ============
+// server/server.js - Actualizar POST /api/permits
 app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res) => {
     try {
         const { 
@@ -552,26 +553,48 @@ app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res)
             work_location, 
             work_description, 
             technician_signature, 
-            photos 
+            photos,
+            locationData  // ✅ NUEVO: datos de ubicación del trabajo
         } = req.body;
         
         const permitNumber = `PTC-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
         const status = (req.user.role === 'admin' || req.user.role === 'supervisor') ? 'APPROVED' : 'PENDING';
         
+        // ✅ Procesar ubicación del trabajo
+        let workLatitude = null;
+        let workLongitude = null;
+        let workRadius = 100;
+        let workLocationId = null;
+        let locationSource = 'manual';
+        
+        if (locationData) {
+            workLatitude = locationData.latitude;
+            workLongitude = locationData.longitude;
+            workRadius = locationData.radius || 100;
+            locationSource = locationData.source || 'gps';
+            
+            if (locationData.type === 'saved' && locationData.id) {
+                workLocationId = locationData.id;
+            }
+        }
+        
         const result = await pool.query(
             `INSERT INTO permits (
                 permit_number, risk_type, safety_checks, technician_name, supervisor_name, 
                 work_location, work_description, status, technician_signature, photos, photos_count, 
-                created_by, created_by_name, created_by_role, company_id, created_at
+                created_by, created_by_name, created_by_role, company_id, created_at,
+                work_latitude, work_longitude, work_radius, work_location_id, location_source
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW()
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, NOW(),
+                $16, $17, $18, $19, $20
             ) RETURNING *`,
             [
                 permitNumber, risk_type, JSON.stringify(safety_checks || {}),
                 technician_name, supervisor_name, work_location, work_description, status,
                 technician_signature ? JSON.stringify(technician_signature) : null,
                 JSON.stringify(photos || []), (photos || []).length,
-                req.user.id, req.user.full_name, req.user.role, req.user.company_id
+                req.user.id, req.user.full_name, req.user.role, req.user.company_id,
+                workLatitude, workLongitude, workRadius, workLocationId, locationSource
             ]
         );
         
@@ -586,7 +609,13 @@ app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res)
             permit: newPermit, 
             safetyEvaluation: { isSafe: true }, 
             pdf: pdfBase64,
-            requiresApproval: req.user.role === 'technician' 
+            requiresApproval: req.user.role === 'technician',
+            locationUsed: {
+                latitude: workLatitude,
+                longitude: workLongitude,
+                radius: workRadius,
+                source: locationSource
+            }
         });
         
     } catch (error) {
@@ -595,21 +624,68 @@ app.post('/api/permits', authenticate, checkSubscriptionLimits, async (req, res)
     }
 });
 
+
+// server/server.js - Actualizar GET /api/permits
 app.get('/api/permits', authenticate, async (req, res) => {
     let query;
     let params;
     
     if (req.user.role === 'technician') {
-        query = 'SELECT * FROM permits WHERE created_by = $1 ORDER BY created_at DESC';
+        query = `SELECT 
+            p.*, 
+            json_build_object(
+                'signerName', t.signature_data->>'signerName',
+                'signatureData', t.signature_data->>'signatureData',
+                'location', t.signature_data->'location',
+                'timestamp', t.signature_data->>'timestamp',
+                'is_within_geofence', ds.is_within_geofence,
+                'distance_to_work_meters', ds.distance_to_work_meters
+            ) as technician_signature,
+            json_build_object(
+                'signerName', s.signature_data->>'signerName',
+                'signatureData', s.signature_data->>'signatureData',
+                'location', s.signature_data->'location',
+                'timestamp', s.signature_data->>'timestamp',
+                'is_within_geofence', ds_sup.is_within_geofence,
+                'distance_to_work_meters', ds_sup.distance_to_work_meters
+            ) as supervisor_signature
+        FROM permits p
+        LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
+        LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
+        WHERE p.created_by = $1 
+        ORDER BY p.created_at DESC`;
         params = [req.user.id];
     } else {
-        query = 'SELECT * FROM permits WHERE company_id = $1 ORDER BY created_at DESC';
+        query = `SELECT 
+            p.*, 
+            json_build_object(
+                'signerName', t.signature_data->>'signerName',
+                'signatureData', t.signature_data->>'signatureData',
+                'location', t.signature_data->'location',
+                'timestamp', t.signature_data->>'timestamp',
+                'is_within_geofence', ds.is_within_geofence,
+                'distance_to_work_meters', ds.distance_to_work_meters
+            ) as technician_signature,
+            json_build_object(
+                'signerName', s.signature_data->>'signerName',
+                'signatureData', s.signature_data->>'signatureData',
+                'location', s.signature_data->'location',
+                'timestamp', s.signature_data->>'timestamp',
+                'is_within_geofence', ds_sup.is_within_geofence,
+                'distance_to_work_meters', ds_sup.distance_to_work_meters
+            ) as supervisor_signature
+        FROM permits p
+        LEFT JOIN digital_signatures ds ON ds.permit_id = p.id AND ds.signer_type = 'technician'
+        LEFT JOIN digital_signatures ds_sup ON ds_sup.permit_id = p.id AND ds_sup.signer_type = 'supervisor'
+        WHERE p.company_id = $1 
+        ORDER BY p.created_at DESC`;
         params = [req.user.company_id];
     }
     
     const result = await pool.query(query, params);
     res.json({ success: true, permits: result.rows });
 });
+
 
 app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'supervisor']), async (req, res) => {
     const { permitId } = req.params;
@@ -735,6 +811,45 @@ app.post('/api/signatures/validate', authenticate, async (req, res) => {
     }
 });
 
+// server/server.js - Agregar después de las rutas de suscripción
+
+// ============ RUTAS DE SITIOS DE TRABAJO ============
+app.get('/api/work-locations', authenticate, async (req, res) => {
+    try {
+        const result = await pool.query(
+            `SELECT id, name, description, latitude, longitude, default_radius, address, is_active, created_at
+             FROM work_locations 
+             WHERE company_id = $1 AND is_active = true
+             ORDER BY name`,
+            [req.user.company_id]
+        );
+        res.json({ success: true, locations: result.rows });
+    } catch (error) {
+        console.error('Error fetching work locations:', error);
+        res.status(500).json({ error: 'Error al cargar sitios de trabajo' });
+    }
+});
+
+app.post('/api/work-locations', authenticate, async (req, res) => {
+    const { name, description, latitude, longitude, default_radius, address } = req.body;
+    
+    if (!name || latitude === undefined || longitude === undefined) {
+        return res.status(400).json({ error: 'Nombre y coordenadas son requeridos' });
+    }
+    
+    try {
+        const result = await pool.query(
+            `INSERT INTO work_locations (company_id, name, description, latitude, longitude, default_radius, address, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING *`,
+            [req.user.company_id, name, description, latitude, longitude, default_radius || 100, address, req.user.id]
+        );
+        res.json({ success: true, location: result.rows[0] });
+    } catch (error) {
+        console.error('Error creating work location:', error);
+        res.status(500).json({ error: 'Error al crear sitio de trabajo' });
+    }
+});
 
 // ✅ Exportar app para Vercel
 module.exports = app;
