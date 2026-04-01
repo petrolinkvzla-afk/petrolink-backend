@@ -714,26 +714,83 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
     const { permitId } = req.params;
     const { action, supervisor_signature, rejection_reason } = req.body;
     
+    console.log('========================================');
+    console.log('📝 APROBACIÓN RECIBIDA:');
+    console.log('Permit ID:', permitId);
+    console.log('Action:', action);
+    console.log('Tiene firma:', !!supervisor_signature);
+    console.log('Rejection reason:', rejection_reason);
+    console.log('Usuario:', req.user?.full_name, '(ID:', req.user?.id, ')');
+    console.log('========================================');
+    
     try {
+        // 1. Verificar si el permiso existe
+        console.log('🔍 Buscando permiso...');
         const permitResult = await pool.query(
             'SELECT * FROM permits WHERE id = $1 AND company_id = $2',
             [parseInt(permitId), req.user.company_id]
         );
         
+        console.log('Permiso encontrado:', permitResult.rows.length > 0);
+        
         if (permitResult.rows.length === 0) {
+            console.log('❌ Permiso no encontrado');
             return res.status(404).json({ error: 'Permiso no encontrado' });
         }
         
         const permit = permitResult.rows[0];
+        console.log('Estado actual del permiso:', permit.status);
+        
         if (permit.status !== 'PENDING') {
+            console.log('❌ Permiso ya procesado, estado:', permit.status);
             return res.status(400).json({ error: 'Ya fue procesado' });
         }
         
         if (action === 'approve') {
-            // ... código de aprobación existente
+            console.log('✅ Procesando APROBACIÓN...');
+            
+            // 2. Actualizar el permiso
+            console.log('📝 Actualizando permiso...');
+            const result = await pool.query(
+                `UPDATE permits 
+                 SET status = 'APPROVED', 
+                     approved_by = $1, 
+                     approved_by_name = $2, 
+                     approved_at = NOW(), 
+                     supervisor_signature = $3 
+                 WHERE id = $4 
+                 RETURNING *`,
+                [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
+            );
+            
+            console.log('✅ Permiso actualizado correctamente');
+            const approvedPermit = result.rows[0];
+            
+            // 3. Generar PDF
+            console.log('📄 Generando PDF...');
+            try {
+                const pdfBuffer = await generateFullPermitPDF(approvedPermit, supervisor_signature);
+                const pdfBase64 = pdfBuffer.toString('base64');
+                console.log('✅ PDF generado, tamaño:', pdfBase64.length);
+                
+                console.log('📤 Enviando respuesta...');
+                return res.json({ 
+                    success: true, 
+                    permit: approvedPermit,
+                    pdf: pdfBase64
+                });
+            } catch (pdfError) {
+                console.error('❌ Error generando PDF:', pdfError);
+                return res.json({ 
+                    success: true, 
+                    permit: approvedPermit,
+                    pdf: null
+                });
+            }
             
         } else if (action === 'reject') {
-            // ✅ RECHAZAR CON PDF
+            console.log('❌ Procesando RECHAZO...');
+            
             const result = await pool.query(
                 `UPDATE permits 
                  SET status = 'REJECTED', 
@@ -746,26 +803,77 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
                 [req.user.id, req.user.full_name, rejection_reason || 'Sin especificar', parseInt(permitId)]
             );
             
+            console.log('✅ Permiso rechazado correctamente');
             const rejectedPermit = result.rows[0];
             
-            // Generar PDF de rechazo
-            const pdfBuffer = await generateRejectionPDF(rejectedPermit);
-            const pdfBase64 = pdfBuffer.toString('base64');
-            
-            return res.json({ 
-                success: true, 
-                permit: rejectedPermit,
-                pdf: pdfBase64
-            });
+            console.log('📄 Generando PDF de rechazo...');
+            try {
+                const pdfBuffer = await generateRejectionPDF(rejectedPermit);
+                const pdfBase64 = pdfBuffer.toString('base64');
+                console.log('✅ PDF de rechazo generado');
+                
+                return res.json({ 
+                    success: true, 
+                    permit: rejectedPermit,
+                    pdf: pdfBase64
+                });
+            } catch (pdfError) {
+                console.error('❌ Error generando PDF de rechazo:', pdfError);
+                return res.json({ 
+                    success: true, 
+                    permit: rejectedPermit,
+                    pdf: null
+                });
+            }
         } else {
+            console.log('⚠️ Acción inválida:', action);
             return res.status(400).json({ error: 'Acción inválida' });
         }
         
     } catch (error) {
-        console.error('Error en aprobación:', error);
-        return res.status(500).json({ error: 'Error al procesar la solicitud' });
+        console.error('❌ ERROR EN APROBACIÓN:', error);
+        console.error('Stack:', error.stack);
+        return res.status(500).json({ error: 'Error al procesar la solicitud', details: error.message });
     }
 });
+
+// Función para generar PDF (si no existe)
+async function generateFullPermitPDF(permit, supervisor_signature = null) {
+    return new Promise((resolve) => {
+        const doc = new PDFDocument({ margin: 50, size: 'A4' });
+        const buffers = [];
+        
+        doc.on('data', buffers.push.bind(buffers));
+        doc.on('end', () => {
+            const pdfData = Buffer.concat(buffers);
+            resolve(pdfData);
+        });
+        
+        // Título
+        doc.fontSize(20).text('ENERGY-COMPLIANCE', { align: 'center' });
+        doc.moveDown();
+        doc.fontSize(14).text('PERMISO DE TRABAJO SEGURO', { align: 'center' });
+        doc.moveDown();
+        
+        // Información básica
+        doc.fontSize(10).text(`Número: ${permit.permit_number}`);
+        doc.text(`Fecha: ${new Date(permit.created_at).toLocaleString()}`);
+        doc.text(`Estado: ${permit.status}`);
+        doc.moveDown();
+        
+        // Información del personal
+        doc.text(`Técnico: ${permit.technician_name}`);
+        doc.text(`Supervisor: ${permit.supervisor_name}`);
+        doc.moveDown();
+        
+        // Ubicación y descripción
+        doc.text(`Ubicación: ${permit.work_location}`);
+        doc.text(`Descripción: ${permit.work_description}`);
+        doc.moveDown();
+        
+        doc.end();
+    });
+}
 
 // ✅ NUEVA FUNCIÓN: Generar PDF de rechazo
 function generateRejectionPDF(permit) {
