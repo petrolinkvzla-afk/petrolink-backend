@@ -710,47 +710,31 @@ app.get('/api/permits', authenticate, async (req, res) => {
 
 // server/server.js - Modificar el reject para generar PDF
 
+// server/server.js - PUT /api/permits/:permitId/approve
 app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'supervisor']), async (req, res) => {
     const { permitId } = req.params;
     const { action, supervisor_signature, rejection_reason } = req.body;
     
     console.log('========================================');
-    console.log('📝 APROBACIÓN RECIBIDA:');
-    console.log('Permit ID:', permitId);
-    console.log('Action:', action);
-    console.log('Tiene firma:', !!supervisor_signature);
-    console.log('Rejection reason:', rejection_reason);
-    console.log('Usuario:', req.user?.full_name, '(ID:', req.user?.id, ')');
-    console.log('========================================');
+    console.log('📝 APROBACIÓN RECIBIDA:', { permitId, action });
     
     try {
-        // 1. Verificar si el permiso existe
-        console.log('🔍 Buscando permiso...');
         const permitResult = await pool.query(
             'SELECT * FROM permits WHERE id = $1 AND company_id = $2',
             [parseInt(permitId), req.user.company_id]
         );
         
-        console.log('Permiso encontrado:', permitResult.rows.length > 0);
-        
         if (permitResult.rows.length === 0) {
-            console.log('❌ Permiso no encontrado');
             return res.status(404).json({ error: 'Permiso no encontrado' });
         }
         
         const permit = permitResult.rows[0];
-        console.log('Estado actual del permiso:', permit.status);
-        
         if (permit.status !== 'PENDING') {
-            console.log('❌ Permiso ya procesado, estado:', permit.status);
             return res.status(400).json({ error: 'Ya fue procesado' });
         }
         
         if (action === 'approve') {
-            console.log('✅ Procesando APROBACIÓN...');
-            
-            // 2. Actualizar el permiso
-            console.log('📝 Actualizando permiso...');
+            // Actualizar el permiso con la firma del supervisor
             const result = await pool.query(
                 `UPDATE permits 
                  SET status = 'APPROVED', 
@@ -763,34 +747,63 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
                 [req.user.id, req.user.full_name, supervisor_signature ? JSON.stringify(supervisor_signature) : null, parseInt(permitId)]
             );
             
-            console.log('✅ Permiso actualizado correctamente');
             const approvedPermit = result.rows[0];
             
-            // 3. Generar PDF
-            console.log('📄 Generando PDF...');
-            try {
-                const pdfBuffer = await generateFullPermitPDF(approvedPermit, supervisor_signature);
-                const pdfBase64 = pdfBuffer.toString('base64');
-                console.log('✅ PDF generado, tamaño:', pdfBase64.length);
-                
-                console.log('📤 Enviando respuesta...');
-                return res.json({ 
-                    success: true, 
-                    permit: approvedPermit,
-                    pdf: pdfBase64
-                });
-            } catch (pdfError) {
-                console.error('❌ Error generando PDF:', pdfError);
-                return res.json({ 
-                    success: true, 
-                    permit: approvedPermit,
-                    pdf: null
-                });
+            // ✅ IMPORTANTE: Asegurar que las firmas estén correctamente formateadas
+            // La firma del técnico ya está en approvedPermit.technician_signature
+            // La firma del supervisor la acabamos de guardar
+            
+            // Procesar las firmas para el PDF
+            let technicianSig = null;
+            if (approvedPermit.technician_signature) {
+                technicianSig = typeof approvedPermit.technician_signature === 'string' 
+                    ? JSON.parse(approvedPermit.technician_signature) 
+                    : approvedPermit.technician_signature;
             }
             
-        } else if (action === 'reject') {
-            console.log('❌ Procesando RECHAZO...');
+            let supervisorSig = supervisor_signature;
+            if (supervisorSig && typeof supervisorSig === 'string') {
+                supervisorSig = JSON.parse(supervisorSig);
+            }
             
+            // Procesar las fotos
+            let photos = [];
+            if (approvedPermit.photos) {
+                photos = typeof approvedPermit.photos === 'string' 
+                    ? JSON.parse(approvedPermit.photos) 
+                    : approvedPermit.photos;
+            }
+            
+            // Crear un objeto completo con todos los datos para el PDF
+            const completePermitForPDF = {
+                ...approvedPermit,
+                technician_signature: technicianSig,
+                supervisor_signature: supervisorSig,
+                photos: photos
+            };
+            
+            console.log('📄 Generando PDF completo con:', {
+                tieneFirmaTecnico: !!technicianSig,
+                tieneFirmaSupervisor: !!supervisorSig,
+                tieneImagenTecnico: technicianSig?.signatureData ? 'SÍ' : 'NO',
+                tieneImagenSupervisor: supervisorSig?.signatureData ? 'SÍ' : 'NO',
+                cantidadFotos: photos?.length || 0
+            });
+            
+            // ✅ Usar la función que genera el PDF COMPLETO (con firmas y fotos)
+            const pdfBuffer = await generateFullPermitPDF(completePermitForPDF, supervisorSig);
+            const pdfBase64 = pdfBuffer.toString('base64');
+            
+            console.log('✅ PDF generado correctamente, tamaño:', pdfBase64.length);
+            
+            return res.json({ 
+                success: true, 
+                permit: approvedPermit,
+                pdf: pdfBase64
+            });
+            
+        } else if (action === 'reject') {
+            // Código de rechazo...
             const result = await pool.query(
                 `UPDATE permits 
                  SET status = 'REJECTED', 
@@ -803,42 +816,27 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
                 [req.user.id, req.user.full_name, rejection_reason || 'Sin especificar', parseInt(permitId)]
             );
             
-            console.log('✅ Permiso rechazado correctamente');
             const rejectedPermit = result.rows[0];
             
-            console.log('📄 Generando PDF de rechazo...');
-            try {
-                const pdfBuffer = await generateRejectionPDF(rejectedPermit);
-                const pdfBase64 = pdfBuffer.toString('base64');
-                console.log('✅ PDF de rechazo generado');
-                
-                return res.json({ 
-                    success: true, 
-                    permit: rejectedPermit,
-                    pdf: pdfBase64
-                });
-            } catch (pdfError) {
-                console.error('❌ Error generando PDF de rechazo:', pdfError);
-                return res.json({ 
-                    success: true, 
-                    permit: rejectedPermit,
-                    pdf: null
-                });
-            }
-        } else {
-            console.log('⚠️ Acción inválida:', action);
-            return res.status(400).json({ error: 'Acción inválida' });
+            // Generar PDF de rechazo (puedes mantener tu función existente)
+            const pdfBuffer = await generateRejectionPDF(rejectedPermit);
+            const pdfBase64 = pdfBuffer.toString('base64');
+            
+            return res.json({ 
+                success: true, 
+                permit: rejectedPermit,
+                pdf: pdfBase64
+            });
         }
         
     } catch (error) {
-        console.error('❌ ERROR EN APROBACIÓN:', error);
-        console.error('Stack:', error.stack);
-        return res.status(500).json({ error: 'Error al procesar la solicitud', details: error.message });
+        console.error('Error en aprobación:', error);
+        return res.status(500).json({ error: 'Error al procesar la solicitud' });
     }
 });
 
 // Función para generar PDF (si no existe)
-async function generateFullPermitPDF(permit, supervisor_signature = null) {
+function generateFullPermitPDF(permit, supervisor_signature = null) {
     return new Promise((resolve) => {
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
         const buffers = [];
@@ -849,27 +847,89 @@ async function generateFullPermitPDF(permit, supervisor_signature = null) {
             resolve(pdfData);
         });
         
-        // Título
-        doc.fontSize(20).text('ENERGY-COMPLIANCE', { align: 'center' });
-        doc.moveDown();
-        doc.fontSize(14).text('PERMISO DE TRABAJO SEGURO', { align: 'center' });
-        doc.moveDown();
+        // Encabezado
+        doc.fontSize(20).font('Helvetica-Bold').text('ENERGY-COMPLIANCE', { align: 'center' });
+        doc.moveDown(0.5);
+        doc.fontSize(14).font('Helvetica').text('PERMISO DE TRABAJO SEGURO', { align: 'center' });
+        doc.moveDown(0.5);
         
-        // Información básica
-        doc.fontSize(10).text(`Número: ${permit.permit_number}`);
-        doc.text(`Fecha: ${new Date(permit.created_at).toLocaleString()}`);
-        doc.text(`Estado: ${permit.status}`);
-        doc.moveDown();
+        // Estado
+        if (permit.status === 'APPROVED') {
+            doc.fontSize(12).font('Helvetica-Bold').fillColor('green').text('✅ APROBADO - TRABAJO SEGURO', { align: 'center' });
+            doc.fillColor('black');
+        }
+        doc.moveDown(0.5);
         
-        // Información del personal
-        doc.text(`Técnico: ${permit.technician_name}`);
-        doc.text(`Supervisor: ${permit.supervisor_name}`);
-        doc.moveDown();
+        // Datos del permiso
+        doc.fontSize(10).font('Helvetica-Bold').text(`Número: ${permit.permit_number}`);
+        doc.font('Helvetica').text(`Fecha: ${new Date(permit.created_at).toLocaleString('es-ES')}`);
+        doc.moveDown(0.5);
         
-        // Ubicación y descripción
-        doc.text(`Ubicación: ${permit.work_location}`);
-        doc.text(`Descripción: ${permit.work_description}`);
-        doc.moveDown();
+        // FIRMA DEL TÉCNICO
+        doc.fontSize(12).font('Helvetica-Bold').text('FIRMA DEL TÉCNICO');
+        doc.moveDown(0.3);
+        
+        if (permit.technician_signature) {
+            const signature = permit.technician_signature;
+            doc.fontSize(10).font('Helvetica').text(`Firmado por: ${signature.signerName || 'Técnico'}`);
+            doc.text(`Fecha: ${new Date(signature.timestamp).toLocaleString('es-ES')}`);
+            if (signature.signatureData) {
+                try {
+                    const base64Data = signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                    const imageBuffer = Buffer.from(base64Data, 'base64');
+                    doc.image(imageBuffer, { width: 200, height: 80 });
+                } catch (err) {
+                    doc.text('(Imagen de firma disponible)');
+                }
+            }
+        }
+        doc.moveDown(0.5);
+        
+        // FIRMA DEL SUPERVISOR
+        doc.fontSize(12).font('Helvetica-Bold').text('FIRMA DEL SUPERVISOR');
+        doc.moveDown(0.3);
+        
+        const supervisorSig = supervisor_signature || permit.supervisor_signature;
+        if (supervisorSig) {
+            doc.fontSize(10).font('Helvetica').text(`Firmado por: ${supervisorSig.signerName || 'Supervisor'}`);
+            doc.text(`Fecha: ${new Date(supervisorSig.timestamp).toLocaleString('es-ES')}`);
+            if (supervisorSig.signatureData) {
+                try {
+                    const base64Data = supervisorSig.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                    const imageBuffer = Buffer.from(base64Data, 'base64');
+                    doc.image(imageBuffer, { width: 200, height: 80 });
+                } catch (err) {
+                    doc.text('(Imagen de firma disponible)');
+                }
+            }
+        }
+        doc.moveDown(0.5);
+        
+        // EVIDENCIA FOTOGRÁFICA
+        doc.fontSize(12).font('Helvetica-Bold').text('EVIDENCIA FOTOGRÁFICA');
+        doc.moveDown(0.3);
+        
+        const photosData = permit.photos;
+        if (photosData && Array.isArray(photosData) && photosData.length > 0) {
+            doc.fontSize(10).text(`${photosData.length} foto(s) adjunta(s):`);
+            doc.moveDown(0.3);
+            
+            photosData.forEach((photo, index) => {
+                if (index < 3 && photo.data) {
+                    try {
+                        const base64Data = photo.data.replace(/^data:image\/\w+;base64,/, '');
+                        const imageBuffer = Buffer.from(base64Data, 'base64');
+                        doc.image(imageBuffer, { width: 150, height: 100 });
+                        doc.text(`Foto ${index + 1}`, { continued: true });
+                        doc.moveDown(0.5);
+                    } catch (err) {
+                        doc.text(`Foto ${index + 1}: Imagen disponible`);
+                    }
+                }
+            });
+        } else {
+            doc.fontSize(10).text('No se adjuntaron fotos como evidencia');
+        }
         
         doc.end();
     });
