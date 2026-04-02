@@ -836,6 +836,8 @@ app.put('/api/permits/:permitId/approve', authenticate, checkRole(['admin', 'sup
 });
 
 // Función para generar PDF (si no existe)
+// server/server.js - Función COMPLETA de generación de PDF
+// server/server.js - Función COMPLETA de generación de PDF
 function generateFullPermitPDF(permit, supervisor_signature = null) {
     return new Promise((resolve) => {
         const doc = new PDFDocument({ margin: 50, size: 'A4' });
@@ -853,9 +855,19 @@ function generateFullPermitPDF(permit, supervisor_signature = null) {
         doc.fontSize(14).font('Helvetica').text('PERMISO DE TRABAJO SEGURO', { align: 'center' });
         doc.moveDown(0.5);
         
+        // Línea separadora
+        doc.moveTo(50, doc.y).lineTo(550, doc.y).stroke();
+        doc.moveDown(0.5);
+        
         // Estado
         if (permit.status === 'APPROVED') {
             doc.fontSize(12).font('Helvetica-Bold').fillColor('green').text('✅ APROBADO - TRABAJO SEGURO', { align: 'center' });
+            doc.fillColor('black');
+        } else if (permit.status === 'REJECTED') {
+            doc.fontSize(12).font('Helvetica-Bold').fillColor('red').text('❌ RECHAZADO', { align: 'center' });
+            doc.fillColor('black');
+        } else {
+            doc.fontSize(12).font('Helvetica-Bold').fillColor('orange').text('⏳ PENDIENTE DE APROBACIÓN', { align: 'center' });
             doc.fillColor('black');
         }
         doc.moveDown(0.5);
@@ -863,25 +875,101 @@ function generateFullPermitPDF(permit, supervisor_signature = null) {
         // Datos del permiso
         doc.fontSize(10).font('Helvetica-Bold').text(`Número: ${permit.permit_number}`);
         doc.font('Helvetica').text(`Fecha: ${new Date(permit.created_at).toLocaleString('es-ES')}`);
+        doc.text(`Riesgo: ${permit.risk_type === 'ALTURA' ? 'Trabajo en Altura' : 
+                             permit.risk_type === 'ELECTRICO' ? 'Riesgo Eléctrico' :
+                             permit.risk_type === 'CONFINADO' ? 'Espacio Confinado' :
+                             permit.risk_type === 'CALIENTE' ? 'Trabajo en Caliente' : permit.risk_type}`);
         doc.moveDown(0.5);
+        
+        // Datos del personal
+        doc.fontSize(12).font('Helvetica-Bold').text('DATOS DEL PERSONAL');
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica').text(`Técnico: ${permit.technician_name}`);
+        doc.text(`Supervisor: ${permit.supervisor_name}`);
+        if (permit.approved_by_name) {
+            doc.text(`Aprobado por: ${permit.approved_by_name}`);
+        }
+        doc.moveDown(0.5);
+        
+        // Ubicación y descripción
+        doc.fontSize(12).font('Helvetica-Bold').text('UBICACIÓN Y DESCRIPCIÓN');
+        doc.moveDown(0.3);
+        doc.fontSize(10).font('Helvetica').text(`Ubicación: ${permit.work_location}`);
+        doc.moveDown(0.3);
+        doc.text('Descripción:');
+        doc.text(permit.work_description, { width: 500, align: 'justify' });
+        doc.moveDown(0.5);
+        
+        // Lista de verificación
+        doc.fontSize(12).font('Helvetica-Bold').text('LISTA DE VERIFICACIÓN');
+        doc.moveDown(0.3);
+        
+        const checks = permit.safety_checks;
+        if (checks && typeof checks === 'object') {
+            Object.entries(checks).forEach(([key, value]) => {
+                const label = key.replace(/_/g, ' ').toUpperCase();
+                doc.fontSize(10).font('Helvetica').text(`${value ? '✓' : '✗'} ${label}: ${value ? 'SÍ' : 'NO'}`);
+            });
+        }
+        doc.moveDown(0.5);
+        
+        // Ubicación GPS del trabajo (Geocerca)
+        if (permit.work_latitude && permit.work_longitude) {
+            doc.fontSize(12).font('Helvetica-Bold').text('UBICACIÓN GPS DEL TRABAJO');
+            doc.moveDown(0.3);
+            doc.fontSize(10).font('Helvetica').text(`Coordenadas: ${parseFloat(permit.work_latitude).toFixed(6)}°, ${parseFloat(permit.work_longitude).toFixed(6)}°`);
+            doc.text(`Radio de tolerancia: ${permit.work_radius || 100} metros`);
+            doc.moveDown(0.5);
+        }
         
         // FIRMA DEL TÉCNICO
         doc.fontSize(12).font('Helvetica-Bold').text('FIRMA DEL TÉCNICO');
         doc.moveDown(0.3);
         
-        if (permit.technician_signature) {
-            const signature = permit.technician_signature;
-            doc.fontSize(10).font('Helvetica').text(`Firmado por: ${signature.signerName || 'Técnico'}`);
-            doc.text(`Fecha: ${new Date(signature.timestamp).toLocaleString('es-ES')}`);
-            if (signature.signatureData) {
+        // Procesar firma del técnico
+        let technicianSig = permit.technician_signature;
+        if (technicianSig && typeof technicianSig === 'string') {
+            try {
+                technicianSig = JSON.parse(technicianSig);
+            } catch (e) {
+                console.error('Error parsing technician signature:', e);
+                technicianSig = null;
+            }
+        }
+        
+        if (technicianSig) {
+            doc.fontSize(10).font('Helvetica').text(`Firmado por: ${technicianSig.signerName || 'Técnico'}`);
+            doc.text(`Fecha: ${technicianSig.timestamp ? new Date(technicianSig.timestamp).toLocaleString('es-ES') : 'Fecha no disponible'}`);
+            
+            // Ubicación de la firma
+            if (technicianSig.location) {
+                doc.text(`Ubicación GPS al firmar: ${technicianSig.location.latitude?.toFixed(6)}, ${technicianSig.location.longitude?.toFixed(6)}`);
+                if (technicianSig.location.accuracy) {
+                    doc.text(`Precisión: ±${Math.round(technicianSig.location.accuracy)}m`);
+                }
+            }
+            
+            // Validación de geocerca
+            if (technicianSig.is_within_geofence !== undefined) {
+                const statusText = technicianSig.is_within_geofence ? '✅ Dentro del área de trabajo' : '❌ Fuera del área de trabajo';
+                doc.text(statusText);
+                if (technicianSig.distance_to_work_meters) {
+                    doc.text(`Distancia al centro: ${Math.round(technicianSig.distance_to_work_meters)}m`);
+                }
+            }
+            
+            // Imagen de la firma
+            if (technicianSig.signatureData) {
                 try {
-                    const base64Data = signature.signatureData.replace(/^data:image\/\w+;base64,/, '');
+                    const base64Data = technicianSig.signatureData.replace(/^data:image\/\w+;base64,/, '');
                     const imageBuffer = Buffer.from(base64Data, 'base64');
                     doc.image(imageBuffer, { width: 200, height: 80 });
                 } catch (err) {
                     doc.text('(Imagen de firma disponible)');
                 }
             }
+        } else {
+            doc.fontSize(10).text('Pendiente de firma');
         }
         doc.moveDown(0.5);
         
@@ -889,10 +977,39 @@ function generateFullPermitPDF(permit, supervisor_signature = null) {
         doc.fontSize(12).font('Helvetica-Bold').text('FIRMA DEL SUPERVISOR');
         doc.moveDown(0.3);
         
-        const supervisorSig = supervisor_signature || permit.supervisor_signature;
+        // Procesar firma del supervisor
+        let supervisorSig = supervisor_signature || permit.supervisor_signature;
+        if (supervisorSig && typeof supervisorSig === 'string') {
+            try {
+                supervisorSig = JSON.parse(supervisorSig);
+            } catch (e) {
+                console.error('Error parsing supervisor signature:', e);
+                supervisorSig = null;
+            }
+        }
+        
         if (supervisorSig) {
             doc.fontSize(10).font('Helvetica').text(`Firmado por: ${supervisorSig.signerName || 'Supervisor'}`);
-            doc.text(`Fecha: ${new Date(supervisorSig.timestamp).toLocaleString('es-ES')}`);
+            doc.text(`Fecha: ${supervisorSig.timestamp ? new Date(supervisorSig.timestamp).toLocaleString('es-ES') : 'Fecha no disponible'}`);
+            
+            // Ubicación de la firma
+            if (supervisorSig.location) {
+                doc.text(`Ubicación GPS al firmar: ${supervisorSig.location.latitude?.toFixed(6)}, ${supervisorSig.location.longitude?.toFixed(6)}`);
+                if (supervisorSig.location.accuracy) {
+                    doc.text(`Precisión: ±${Math.round(supervisorSig.location.accuracy)}m`);
+                }
+            }
+            
+            // Validación de geocerca
+            if (supervisorSig.is_within_geofence !== undefined) {
+                const statusText = supervisorSig.is_within_geofence ? '✅ Dentro del área de trabajo' : '❌ Fuera del área de trabajo';
+                doc.text(statusText);
+                if (supervisorSig.distance_to_work_meters) {
+                    doc.text(`Distancia al centro: ${Math.round(supervisorSig.distance_to_work_meters)}m`);
+                }
+            }
+            
+            // Imagen de la firma
             if (supervisorSig.signatureData) {
                 try {
                     const base64Data = supervisorSig.signatureData.replace(/^data:image\/\w+;base64,/, '');
@@ -902,6 +1019,10 @@ function generateFullPermitPDF(permit, supervisor_signature = null) {
                     doc.text('(Imagen de firma disponible)');
                 }
             }
+        } else if (permit.status === 'PENDING') {
+            doc.fontSize(10).text('Pendiente de aprobación');
+        } else {
+            doc.fontSize(10).text('No firmado');
         }
         doc.moveDown(0.5);
         
@@ -909,9 +1030,19 @@ function generateFullPermitPDF(permit, supervisor_signature = null) {
         doc.fontSize(12).font('Helvetica-Bold').text('EVIDENCIA FOTOGRÁFICA');
         doc.moveDown(0.3);
         
-        const photosData = permit.photos;
+        // Procesar fotos
+        let photosData = permit.photos;
+        if (photosData && typeof photosData === 'string') {
+            try {
+                photosData = JSON.parse(photosData);
+            } catch (e) {
+                console.error('Error parsing photos:', e);
+                photosData = [];
+            }
+        }
+        
         if (photosData && Array.isArray(photosData) && photosData.length > 0) {
-            doc.fontSize(10).text(`${photosData.length} foto(s) adjunta(s):`);
+            doc.fontSize(10).text(`${photosData.length} foto(s) adjunta(s) como evidencia del trabajo realizado:`);
             doc.moveDown(0.3);
             
             photosData.forEach((photo, index) => {
@@ -927,9 +1058,25 @@ function generateFullPermitPDF(permit, supervisor_signature = null) {
                     }
                 }
             });
+            if (photosData.length > 3) {
+                doc.text(`... y ${photosData.length - 3} foto(s) adicional(es)`);
+            }
         } else {
             doc.fontSize(10).text('No se adjuntaron fotos como evidencia');
         }
+        doc.moveDown(0.5);
+        
+        // Código de verificación
+        doc.fontSize(8).fillColor('gray').text(`Código de verificación: ${permit.permit_number.split('-')[1]}`, { align: 'center' });
+        doc.moveDown(0.3);
+        
+        // Pie de página
+        doc.fontSize(8).fillColor('gray').text(
+            `Documento generado por Energy-Compliance - Sistema de Gestión de Permisos de Trabajo Seguro\n` +
+            `Este documento tiene validez legal y debe ser presentado en caso de auditoría.\n` +
+            `Fecha de emisión: ${new Date().toLocaleString('es-ES')}`,
+            { align: 'center', width: 500 }
+        );
         
         doc.end();
     });
